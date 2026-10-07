@@ -1,103 +1,55 @@
 /**
  * Where to find each piece of data in a Give Lively record.
  *
- * Give Lively does not document the field names in its JSON feed, so these are
- * candidate lists: the first candidate that exists on a record (and is not empty)
- * wins. Matching ignores case, spaces, dashes and underscores, so "Donor Email",
- * "donor_email" and "donorEmail" are all the same. Dotted paths reach into nested
- * objects ("donor.email").
- *
- * After running GET /sample against the real feed, reorder or replace these lists
- * so the real field name comes first. This is the main file to edit.
+ * Field names come from the Give Lively Zapier JSON feed (json_dataclips), which
+ * returns one record per line item. Each list is tried in order and the first
+ * non-empty field wins. Matching ignores case, spaces, dashes and underscores.
  */
 export const FIELDS = {
-  /** Unique ID for the record. Also used as Meta's event_id for dedupe. */
-  id: ["line_item_id", "donation_id", "transaction_id", "id", "uuid"],
+  /** One record per line item (one ticket, or one donation). */
+  lineId: ["line_item_id"],
+  /** Line items bought together share an order ID. Sent to Meta as order_id. */
+  orderId: ["order_id"],
 
-  /** When the purchase happened. */
-  time: [
-    "created_at",
-    "donated_at",
-    "transaction_date",
-    "donation_date",
-    "completed_at",
-    "submitted_at",
-    "date",
-    "updated_at",
-  ],
+  /** When the payment went through. */
+  time: ["payment_succeeded_date", "payment_platform_donation_date", "date"],
 
-  email: ["email", "donor_email", "email_address", "purchaser_email", "donor.email"],
-  firstName: ["first_name", "donor_first_name", "firstname", "donor.first_name"],
-  lastName: ["last_name", "donor_last_name", "lastname", "donor.last_name"],
-  /** Used only when first/last name fields are missing. */
-  fullName: ["donor_name", "full_name", "name", "donor.name"],
-  phone: ["phone", "phone_number", "donor_phone", "mobile", "donor.phone"],
+  email: ["email"],
+  firstName: ["first_name"],
+  lastName: ["last_name"],
+  fullName: ["full_name"],
+  phone: ["donor_phone_number"],
+  city: ["donor_mailing_city"],
+  state: ["donor_mailing_state"],
+  zip: ["donor_mailing_zip", "donor_billing_zip_code"],
+  country: ["donor_mailing_country", "donor_billing_country"],
 
   /**
-   * Purchase value. If a field name contains "cents" the value is divided by 100.
-   * Put the field that matches your choice about tips/fees first.
+   * Purchase value fields, used when VALUE_FIELD is not set or is empty on a record.
+   * original_amount: ticket price or donation amount.
+   * gross_amount: what the buyer paid, including fees they chose to cover.
+   * net_amount: what the nonprofit receives after fees.
    */
-  amount: [
-    "ticket_amount",
-    "ticket_price",
-    "amount",
-    "donation_amount",
-    "total_amount",
-    "gross_amount",
-    "amount_cents",
-    "amount_in_cents",
-  ],
+  amount: ["original_amount", "gross_amount"],
 
-  quantity: ["quantity", "ticket_quantity", "num_tickets", "tickets_count"],
+  status: ["payment_status"],
+  refundedAmount: ["total_refunded_amount"],
+  refundStatus: ["refund_status"],
+  disputedAt: ["disputed_at"],
 
-  status: ["status", "donation_status", "payment_status", "state"],
-
-  /** A field whose value says what kind of line item this is ("ticket", "donation", ...). */
-  type: [
-    "line_item_type",
-    "item_type",
-    "product_type",
-    "transaction_type",
-    "donation_type",
-    "type",
-    "kind",
-    "category",
-  ],
-
-  /** A field that only exists (or is only filled in) on ticket purchases. */
-  ticket: ["ticket_name", "ticket_type", "ticket_level", "ticket_tier", "tickets", "ticket"],
+  /** Only filled in on ticket line items (the ticket type ID). */
+  ticketId: ["ticket_id"],
 
   /** Fields searched for EVENT_MATCH (case-insensitive substring). */
-  event: [
-    "event_name",
-    "event_title",
-    "event_slug",
-    "event",
-    "campaign_name",
-    "campaign_title",
-    "campaign",
-    "page_name",
-    "page_title",
-    "page_slug",
-    "fundraising_page",
-    "page_url",
-    "url",
-    "source",
-  ],
+  match: ["page_name", "page_slug", "event_name", "internal_name", "campaign_name", "page_url"],
+  /** Shown as Meta content_name. */
+  contentName: ["event_name", "campaign_name", "page_name"],
+  /** Sent as event_source_url. Falls back to EVENT_PAGE_URL. */
+  pageUrl: ["page_url"],
 } as const;
 
-/** Status values that count as a completed payment. */
-export const OK_STATUSES = [
-  "succeeded",
-  "success",
-  "successful",
-  "completed",
-  "complete",
-  "paid",
-  "settled",
-  "captured",
-  "approved",
-];
+/** payment_status values that count as paid. */
+export const OK_STATUSES = ["succeeded", "success", "successful", "completed", "complete", "paid"];
 
 export type GLRecord = Record<string, unknown>;
 

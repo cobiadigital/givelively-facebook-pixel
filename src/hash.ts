@@ -30,3 +30,30 @@ export function normalizePhone(phone: string): string | undefined {
   if (d.length >= 11 && d.length <= 15) return d;
   return undefined;
 }
+
+/** Meta: city lowercase, no spaces or punctuation. */
+export function normalizeCity(city: string): string | undefined {
+  const c = city.trim().toLowerCase().replace(/[\p{P}\p{S}\s\d]/gu, "");
+  return c || undefined;
+}
+
+/** Meta: 2-letter state/province code, lowercase. Longer names are lowercased without spaces. */
+export function normalizeState(state: string): string | undefined {
+  const s = state.trim().toLowerCase().replace(/[\p{P}\p{S}\s]/gu, "");
+  return s || undefined;
+}
+
+/** Meta: lowercase, no spaces or dashes. US ZIP codes use the first 5 digits only. */
+export function normalizeZip(zip: string): string | undefined {
+  const z = zip.trim().toLowerCase().replace(/[\s-]/g, "");
+  if (/^\d{5}(\d{4})?$/.test(z)) return z.slice(0, 5);
+  return z || undefined;
+}
+
+/** Meta: ISO 3166-1 alpha-2 country code, lowercase. */
+export function normalizeCountry(country: string): string | undefined {
+  const c = country.trim().toLowerCase();
+  if (/^[a-z]{2}$/.test(c)) return c;
+  if (["usa", "united states", "united states of america"].includes(c)) return "us";
+  return undefined;
+}

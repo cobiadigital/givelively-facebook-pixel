@@ -1,7 +1,7 @@
 import { missingForFetch, missingForSend, type Config } from "./config";
-import type { FinalStatus, Store } from "./db";
-import type { GLRecord } from "./fields";
-import { classify } from "./filter";
+import type { FinalRow, Store } from "./db";
+import { FIELDS, pickAmount, pickText, type GLRecord } from "./fields";
+import { classify, valueFields, type Kind } from "./filter";
 import { GiveLivelyError, fetchRecords } from "./giveLively";
 import { toMetaEvent, type MetaEvent } from "./map";
 import { sendEvents } from "./meta";
@@ -10,7 +10,7 @@ import { sendEvents } from "./meta";
 export const MAX_BATCH = 500;
 /** When a batch is rejected, events are retried one by one, up to this many per run. */
 export const MAX_SINGLE_SENDS = 25;
-/** A single event rejected this many runs in a row (with nothing else succeeding) is given up on. */
+/** An event rejected this many runs in a row (with nothing else succeeding) is given up on. */
 export const MAX_ATTEMPTS = 5;
 const LOCK_TTL_MS = 2 * 60 * 1000;
 
@@ -28,7 +28,9 @@ export interface RunOptions {
 
 export interface PreviewRow {
   event_id: string;
-  decision: "would_send" | "would_skip" | "already_done";
+  line_item_ids: string[];
+  decision: "would_send" | "would_skip";
+  event_name?: MetaEvent["event_name"];
   reason?: string;
   value?: number;
   event_time?: string;
@@ -43,14 +45,19 @@ export interface RunSummary {
   result: "ok" | "partial" | "error" | "disabled" | "locked" | "config_missing";
   error?: string;
   window_start?: string;
+  /** Line items in the feed window. */
   fetched: number;
+  /** Line items that passed the filter. */
   matched: number;
+  /** Matched line items already handled in an earlier run. */
   already_done: number;
+  /** Meta events (one per order) sent, skipped, rejected or failed this run. */
   sent: number;
   skipped: number;
   rejected: number;
   failed: number;
   deferred: number;
+  /** Line items that did not pass the filter, by reason. */
   filtered: Record<string, number>;
   cursor_advanced: boolean;
   preview?: PreviewRow[];
@@ -58,10 +65,20 @@ export interface RunSummary {
 
 const iso = (ms: number) => new Date(ms).toISOString();
 
-type Candidate = { id: string; value: number | null } & (
-  | { ok: true; event: MetaEvent }
-  | { ok: false; reason: string }
-);
+interface Line {
+  id: string;
+  record: GLRecord;
+  value: number | null;
+}
+
+/** The new line items of one order and kind. They become one Meta event. */
+interface Group {
+  orderId: string | null;
+  kind: Kind;
+  lines: Line[];
+  eventId: string;
+  result?: Awaited<ReturnType<typeof toMetaEvent>>;
+}
 
 export async function runPoll(cfg: Config, deps: Deps, opts: RunOptions): Promise<RunSummary> {
   const startMs = deps.now();
@@ -88,6 +105,7 @@ export async function runPoll(cfg: Config, deps: Deps, opts: RunOptions): Promis
     deps.log("poll", logged);
     return s;
   };
+  const bump = (reason: string) => (s.filtered[reason] = (s.filtered[reason] ?? 0) + 1);
 
   await deps.store.init();
 
@@ -115,70 +133,107 @@ export async function runPoll(cfg: Config, deps: Deps, opts: RunOptions): Promis
       cursor > 0 ? cursor - cfg.overlapMs : startMs - cfg.backfillHours * 3600 * 1000;
     s.window_start = iso(windowStart);
 
-    const records: GLRecord[] = await fetchRecords(cfg, windowStart, deps.fetch);
+    const records = await fetchRecords(cfg, windowStart, deps.fetch);
     s.fetched = records.length;
 
-    // Filter and map. The feed can repeat a record, so keep the first copy of each ID.
-    const candidates = new Map<string, Candidate>();
+    // 1. Filter line items. The feed can repeat a record, so keep the first copy of each.
+    const matched = new Map<string, { line: Line; kind: Kind; orderId: string | null }>();
     for (const record of records) {
       const c = classify(record, cfg);
       if (!c.ok) {
-        s.filtered[c.reason] = (s.filtered[c.reason] ?? 0) + 1;
+        bump(c.reason);
         continue;
       }
+      const id = pickText(record, FIELDS.lineId);
+      if (!id) {
+        bump("no_line_item_id");
+        continue;
+      }
+      if (matched.has(id)) continue;
       s.matched++;
-      const m = await toMetaEvent(record, cfg, startMs);
-      if (!m.ok && !m.id) {
-        s.filtered[m.reason] = (s.filtered[m.reason] ?? 0) + 1;
-        deps.log("unmappable_record", { reason: m.reason });
-        continue;
-      }
-      const id = m.id!;
-      if (candidates.has(id)) continue;
-      candidates.set(
-        id,
-        m.ok
-          ? { id, value: m.value, ok: true, event: m.event }
-          : { id, value: null, ok: false, reason: m.reason },
-      );
+      matched.set(id, {
+        line: { id, record, value: pickAmount(record, valueFields(cfg)) ?? null },
+        kind: c.kind,
+        orderId: pickText(record, FIELDS.orderId) ?? null,
+      });
     }
 
-    const done = await deps.store.getFinalIds([...candidates.keys()]);
+    // 2. Drop line items handled in an earlier run.
+    const done = await deps.store.getFinalIds([...matched.keys()]);
     s.already_done = done.size;
-    const fresh = [...candidates.values()].filter((c) => !done.has(c.id));
-    const toSkip = fresh.filter((c): c is Candidate & { ok: false } => !c.ok);
-    const toSend = fresh.filter((c): c is Candidate & { ok: true } => c.ok);
+
+    // 3. Group the rest by order, so a 4-ticket order is one Purchase worth all 4.
+    const groups = new Map<string, Group>();
+    for (const m of matched.values()) {
+      if (done.has(m.line.id)) continue;
+      const key = `${m.kind}:${m.orderId ?? m.line.id}`;
+      const g = groups.get(key);
+      if (g) g.lines.push(m.line);
+      else groups.set(key, { orderId: m.orderId, kind: m.kind, lines: [m.line], eventId: "" });
+    }
+
+    // The Meta event_id is the order ID. If part of the order was already sent in
+    // an earlier run, use a distinct ID so Meta doesn't drop the rest as a duplicate.
+    const orderIds = [...groups.values()].map((g) => g.orderId).filter((o): o is string => !!o);
+    const partlySent = await deps.store.getSentOrderIds([...new Set(orderIds)]);
+    for (const g of groups.values()) {
+      g.lines.sort((a, b) => a.id.localeCompare(b.id));
+      const base = g.orderId ?? g.lines[0]!.id;
+      g.eventId = g.orderId && partlySent.has(g.orderId) ? `${base}:${g.lines[0]!.id}` : base;
+      g.result = await toMetaEvent(g.lines.map((l) => l.record), g.kind, g.eventId, cfg, startMs);
+    }
+
+    const all = [...groups.values()];
+    const toSkip = all.filter((g) => !g.result!.ok);
+    const toSend = all.filter((g) => g.result!.ok);
+    const eventOf = (g: Group) => (g.result as { ok: true; event: MetaEvent }).event;
+    const reasonOf = (g: Group) => (g.result as { ok: false; reason: string }).reason;
 
     if (opts.dryRun) {
-      s.preview = [...candidates.values()].map((c) => {
-        if (done.has(c.id)) return { event_id: c.id, decision: "already_done" };
-        if (!c.ok) return { event_id: c.id, decision: "would_skip", reason: c.reason };
-        return {
-          event_id: c.id,
-          decision: "would_send",
-          value: c.event.custom_data.value,
-          event_time: iso(c.event.event_time * 1000),
-          num_items: c.event.custom_data.num_items,
-        };
-      });
+      s.preview = all.map((g) =>
+        g.result!.ok
+          ? {
+              event_id: g.eventId,
+              line_item_ids: g.lines.map((l) => l.id),
+              decision: "would_send",
+              event_name: eventOf(g).event_name,
+              value: eventOf(g).custom_data.value,
+              event_time: iso(eventOf(g).event_time * 1000),
+              num_items: eventOf(g).custom_data.num_items,
+            }
+          : {
+              event_id: g.eventId,
+              line_item_ids: g.lines.map((l) => l.id),
+              decision: "would_skip",
+              reason: reasonOf(g),
+            },
+      );
       s.skipped = toSkip.length;
       return await finish(false);
     }
 
     const nowIso = iso(startMs);
-    const finals: { event_id: string; status: FinalStatus; value: number | null; reason: string | null }[] =
-      toSkip.map((c) => ({ event_id: c.id, status: "skipped", value: c.value, reason: c.reason }));
+    const finals: FinalRow[] = [];
+    const finalize = (g: Group, status: FinalRow["status"], reason: string | null) => {
+      for (const l of g.lines) {
+        finals.push({ event_id: l.id, order_id: g.orderId, status, value: l.value, reason });
+      }
+    };
+
+    for (const g of toSkip) {
+      finalize(g, "skipped", reasonOf(g));
+      deps.log("skipped_order", { event_id: g.eventId, reason: reasonOf(g) });
+    }
     s.skipped = toSkip.length;
-    for (const c of toSkip) deps.log("skipped_record", { event_id: c.id, reason: c.reason });
 
     const batch = toSend.slice(0, MAX_BATCH);
     s.deferred = toSend.length - batch.length;
     let pending = 0;
 
     if (batch.length) {
-      const res = await sendEvents(cfg, batch.map((c) => c.event), deps.fetch);
+      const res = await sendEvents(cfg, batch.map(eventOf), deps.fetch);
       if (res.ok) {
-        for (const c of batch) finals.push({ event_id: c.id, status: "sent", value: c.value, reason: null });
+        for (const g of batch) finalize(g, "sent", null);
         s.sent = batch.length;
       } else if (res.retryable) {
         pending = batch.length;
@@ -188,21 +243,21 @@ export async function runPoll(cfg: Config, deps: Deps, opts: RunOptions): Promis
         // One or more events were invalid. Retry individually to find which.
         s.error = `Meta HTTP ${res.status}: ${res.message}`;
         const singles = batch.length === 1 ? [] : batch.slice(0, MAX_SINGLE_SENDS);
-        const bad: { c: Candidate & { ok: true }; message: string }[] =
-          batch.length === 1 ? [{ c: batch[0]!, message: res.message }] : [];
+        const bad: { g: Group; message: string }[] =
+          batch.length === 1 ? [{ g: batch[0]!, message: res.message }] : [];
         let stoppedAt = singles.length;
         for (let i = 0; i < singles.length; i++) {
-          const c = singles[i]!;
-          const r = await sendEvents(cfg, [c.event], deps.fetch);
+          const g = singles[i]!;
+          const r = await sendEvents(cfg, [eventOf(g)], deps.fetch);
           if (r.ok) {
-            finals.push({ event_id: c.id, status: "sent", value: c.value, reason: null });
+            finalize(g, "sent", null);
             s.sent++;
           } else if (r.retryable) {
             stoppedAt = i;
             s.error = `Meta HTTP ${r.status}: ${r.message}`;
             break;
           } else {
-            bad.push({ c, message: r.message });
+            bad.push({ g, message: r.message });
           }
         }
         const untried = batch.length === 1 ? 0 : batch.length - stoppedAt;
@@ -212,18 +267,21 @@ export async function runPoll(cfg: Config, deps: Deps, opts: RunOptions): Promis
         if (s.sent > 0) {
           // Other events went through, so the configuration is fine and these are bad data.
           for (const b of bad) {
-            finals.push({ event_id: b.c.id, status: "rejected", value: b.c.value, reason: b.message.slice(0, 200) });
+            finalize(b.g, "rejected", b.message.slice(0, 200));
             s.rejected++;
           }
         } else if (bad.length) {
           // Nothing succeeded: could be configuration. Count attempts before giving up.
           const attempts = await deps.store.recordFailures(
-            bad.map((b) => ({ event_id: b.c.id, value: b.c.value, reason: b.message.slice(0, 200) })),
+            bad.flatMap((b) =>
+              b.g.lines.map((l) => ({ event_id: l.id, value: l.value, reason: b.message.slice(0, 200) })),
+            ),
             nowIso,
           );
           for (const b of bad) {
-            if ((attempts.get(b.c.id) ?? 0) >= MAX_ATTEMPTS) {
-              finals.push({ event_id: b.c.id, status: "rejected", value: b.c.value, reason: b.message.slice(0, 200) });
+            const n = Math.max(...b.g.lines.map((l) => attempts.get(l.id) ?? 0));
+            if (n >= MAX_ATTEMPTS) {
+              finalize(b.g, "rejected", b.message.slice(0, 200));
               s.rejected++;
             } else {
               pending++;

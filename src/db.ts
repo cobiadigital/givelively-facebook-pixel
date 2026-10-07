@@ -9,12 +9,23 @@ export const FINAL_STATUSES = ["sent", "skipped", "rejected"] as const;
 export type FinalStatus = (typeof FINAL_STATUSES)[number];
 
 export interface EventRow {
+  /** Give Lively line_item_id. */
   event_id: string;
+  /** Give Lively order_id (the Meta event_id is usually this). */
+  order_id?: string | null;
   status: FinalStatus | "failed";
   value: number | null;
   reason: string | null;
   sent_at: string;
   attempts?: number;
+}
+
+export interface FinalRow {
+  event_id: string;
+  order_id: string | null;
+  status: FinalStatus;
+  value: number | null;
+  reason: string | null;
 }
 
 export interface Store {
@@ -23,8 +34,10 @@ export interface Store {
   setState(entries: Record<string, string>): Promise<void>;
   /** IDs among `ids` that have a final status. */
   getFinalIds(ids: string[]): Promise<Set<string>>;
+  /** Order IDs among `orderIds` that already have a sent line item. */
+  getSentOrderIds(orderIds: string[]): Promise<Set<string>>;
   /** Insert final rows. Existing final rows are never overwritten. */
-  recordFinal(rows: { event_id: string; status: FinalStatus; value: number | null; reason: string | null }[], nowIso: string): Promise<void>;
+  recordFinal(rows: FinalRow[], nowIso: string): Promise<void>;
   /** Count a failed attempt for each id and return the new attempt counts. */
   recordFailures(rows: { event_id: string; value: number | null; reason: string }[], nowIso: string): Promise<Map<string, number>>;
   acquireLock(owner: string, nowMs: number, ttlMs: number): Promise<boolean>;
@@ -40,7 +53,8 @@ const SCHEMA = [
     value REAL,
     status TEXT NOT NULL,
     reason TEXT,
-    attempts INTEGER NOT NULL DEFAULT 0
+    attempts INTEGER NOT NULL DEFAULT 0,
+    order_id TEXT
   )`,
   `CREATE TABLE IF NOT EXISTS state (key TEXT PRIMARY KEY, value TEXT NOT NULL)`,
   `CREATE TABLE IF NOT EXISTS locks (name TEXT PRIMARY KEY, owner TEXT NOT NULL, until INTEGER NOT NULL)`,
@@ -60,6 +74,26 @@ export class D1Store implements Store {
 
   async init(): Promise<void> {
     await this.db.batch(SCHEMA.map((sql) => this.db.prepare(sql)));
+    // Tables created by the first version lack order_id.
+    const col = await this.db
+      .prepare("SELECT COUNT(*) AS n FROM pragma_table_info('sent_events') WHERE name = 'order_id'")
+      .first<{ n: number }>();
+    if (!col?.n) await this.db.prepare("ALTER TABLE sent_events ADD COLUMN order_id TEXT").run();
+  }
+
+  async getSentOrderIds(orderIds: string[]): Promise<Set<string>> {
+    const found = new Set<string>();
+    for (const part of chunks(orderIds, CHUNK)) {
+      const placeholders = part.map((_, i) => `?${i + 1}`).join(",");
+      const { results } = await this.db
+        .prepare(
+          `SELECT DISTINCT order_id FROM sent_events WHERE status = 'sent' AND order_id IN (${placeholders})`,
+        )
+        .bind(...part)
+        .all<{ order_id: string }>();
+      for (const r of results) found.add(r.order_id);
+    }
+    return found;
   }
 
   async getState(key: string): Promise<string | null> {
@@ -96,20 +130,17 @@ export class D1Store implements Store {
     return found;
   }
 
-  async recordFinal(
-    rows: { event_id: string; status: FinalStatus; value: number | null; reason: string | null }[],
-    nowIso: string,
-  ): Promise<void> {
+  async recordFinal(rows: FinalRow[], nowIso: string): Promise<void> {
     if (!rows.length) return;
     const stmts = rows.map((r) =>
       this.db
         .prepare(
-          `INSERT INTO sent_events (event_id, sent_at, value, status, reason) VALUES (?1, ?2, ?3, ?4, ?5)
+          `INSERT INTO sent_events (event_id, sent_at, value, status, reason, order_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
            ON CONFLICT(event_id) DO UPDATE SET sent_at = excluded.sent_at, value = excluded.value,
-             status = excluded.status, reason = excluded.reason
+             status = excluded.status, reason = excluded.reason, order_id = excluded.order_id
            WHERE sent_events.status = 'failed'`,
         )
-        .bind(r.event_id, nowIso, r.value, r.status, r.reason),
+        .bind(r.event_id, nowIso, r.value, r.status, r.reason, r.order_id),
     );
     await this.db.batch(stmts);
   }
@@ -164,7 +195,7 @@ export class D1Store implements Store {
   async recent(limit: number): Promise<EventRow[]> {
     const { results } = await this.db
       .prepare(
-        "SELECT event_id, status, value, reason, sent_at, attempts FROM sent_events ORDER BY sent_at DESC LIMIT ?1",
+        "SELECT event_id, order_id, status, value, reason, sent_at, attempts FROM sent_events ORDER BY sent_at DESC LIMIT ?1",
       )
       .bind(limit)
       .all<EventRow>();

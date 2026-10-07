@@ -3,16 +3,19 @@
 Give Lively hosts its own checkout, so you can't put a Meta Pixel on it. This Worker
 closes that gap: every few minutes it polls Give Lively's JSON feed (the same one that
 powers its Zapier integration), picks out paid **ticket sales for one event**, and sends
-each one to Meta as a server-side **Purchase** event. Facebook and Instagram campaigns can
-then optimize for, and report on, real ticket sales.
+each order to Meta as a server-side **Purchase** event. Facebook and Instagram campaigns can
+then optimize for, and report on, real ticket sales. It can also send donations to a
+campaign as **Donate** events (`TRACK=donations` or `both`).
 
 It replaces a Zapier Zap. It runs on the Cloudflare Workers free plan with a free D1
 database, has no runtime dependencies, and you can set it up and run it entirely from a
 phone using the Cloudflare dashboard.
 
-- Plain donations and other events are ignored.
+- Plain donations and other events are ignored (unless you turn donations on).
+- One order is one event: a 4-ticket order is one Purchase worth all 4 tickets.
 - Each sale is sent exactly once, even when Give Lively shows the record again after an update.
-- Email, name and phone are SHA-256 hashed before they leave the Worker. Raw PII is never stored or logged.
+- Email, name, phone and city/state/ZIP/country are SHA-256 hashed before they leave the
+  Worker. Raw PII is never stored or logged.
 - No secrets live in this repo. You enter them once in the Cloudflare dashboard.
 
 ## How it works
@@ -20,8 +23,8 @@ phone using the Cloudflare dashboard.
 ```
 Cron (every 5 min) ─► fetch Give Lively feed since last run (minus 10 min overlap)
                    ─► keep paid tickets for EVENT_MATCH       (src/filter.ts)
-                   ─► drop IDs already sent                   (D1)
-                   ─► map + hash into Meta events             (src/map.ts)
+                   ─► drop line items already sent            (D1)
+                   ─► group by order, map + hash              (src/map.ts)
                    ─► one batched POST to Meta CAPI           (src/meta.ts)
                    ─► save sent IDs, advance cursor on success
 ```
@@ -74,15 +77,22 @@ kept across deploys.
 
 | Name | Value | Needed for |
 |---|---|---|
-| `GL_ORG_ID` | Give Lively org ID | Phase 1 |
-| `EVENT_MATCH` | Text that identifies your event, e.g. `Art Soup 2026` (case-insensitive) | Phase 2 |
-| `EVENT_PAGE_URL` | Public ticket page URL | Phase 2 |
-| `META_PIXEL_ID` | Pixel/dataset ID | Phase 2 |
+| `GL_ORG_ID` | Give Lively org ID | Reading the feed |
+| `EVENT_MATCH` | Text found in the page name, slug or URL, e.g. `art-soup-2026-tickets` (case-insensitive) | Sending |
+| `META_PIXEL_ID` | Pixel/dataset ID | Sending |
 | `META_TEST_EVENT_CODE` | From Events Manager → Test events. Delete it to go live. | Testing |
-| `SEND_TO_META` | `true` to start sending. Leave it unset until testing. | Phase 2 |
+| `SEND_TO_META` | `true` to start sending. Leave it unset until testing. | Sending |
 
-Optional: `CURRENCY` (default `USD`), `META_ACTION_SOURCE` (default `website`, see
-[Troubleshooting](#troubleshooting)).
+Optional:
+
+| Name | Default | Purpose |
+|---|---|---|
+| `TRACK` | `tickets` | `tickets` (Purchase), `donations` (Donate) or `both` |
+| `VALUE_FIELD` | `original_amount` | `original_amount` = ticket price; `gross_amount` = what the buyer paid incl. fees they chose to cover; `net_amount` = after fees |
+| `SEND_LOCATION` | `true` | `false` stops sending hashed city/state/ZIP/country |
+| `EVENT_PAGE_URL` | the record's `page_url` | Override for `event_source_url` |
+| `CURRENCY` | `USD` | Purchase currency |
+| `META_ACTION_SOURCE` | `website` | See [Troubleshooting](#troubleshooting) |
 
 These live in the dashboard, not the repo, because `wrangler.jsonc` sets
 `"keep_vars": true`. The repo only holds generic defaults (`META_API_VERSION`,
@@ -101,33 +111,60 @@ admin token once; the page remembers it in that browser only. Buttons:
 
 The page itself holds no data. Every endpoint needs `Authorization: Bearer <ADMIN_TOKEN>`.
 
-## Phase 1: discover the feed's fields
+## The Give Lively feed
 
-Give Lively doesn't document the feed's field names, or how tickets look in it. So
-before anything is sent to Meta:
+The feed returns one record per **line item** (one ticket, or one donation), newest
+change first, filtered by `data_modified_timestamp` when `start_time_ms` is passed.
+The fields this Worker uses (all mapped in `src/fields.ts`):
 
-1. Buy one test ticket on the event page, and make one small plain donation.
-2. In the console, tap **Sample schema** (window: 24 hours).
-3. Look at `shapes` (records grouped by their set of fields) and `schema` (every field
-   path, its type, how many records have it, and what its strings look like).
-4. To see values for fields that aren't personal, such as status or line-item type,
-   enter them in *Show values for fields*, e.g. `status, line_item_type, event_name`.
-   Personal fields (email, names, address, phone, notes...) are always blocked, and
-   anything that looks like an email or phone number is hidden.
-5. If `EVENT_MATCH` is set, `current_filter` shows how today's filter classifies each record.
+| Give Lively field | Used for |
+|---|---|
+| `line_item_id` | Dedupe (stored in D1) |
+| `order_id` | Groups tickets bought together; Meta `event_id` and `order_id` |
+| `ticket_id` | Present only on tickets. Tells tickets from donations; Meta `content_ids` |
+| `page_name`, `page_slug`, `event_name`, `internal_name`, `campaign_name`, `page_url` | Matched against `EVENT_MATCH` |
+| `payment_status` | Must be `Succeeded` |
+| `total_refunded_amount`, `refund_status`, `disputed_at` | Refunded or disputed line items are skipped |
+| `original_amount` (or `VALUE_FIELD`) | Meta `value` |
+| `payment_succeeded_date` (fallback `date`) | Meta `event_time` |
+| `email`, `first_name`, `last_name`, `donor_phone_number` | Hashed `em`, `fn`, `ln`, `ph` |
+| `donor_mailing_city`, `_state`, `_zip`, `_country` (fallback billing ZIP/country) | Hashed `ct`, `st`, `zp`, `country` |
+| `event_name` / `campaign_name` | Meta `content_name` |
+| `page_url` | Meta `event_source_url` |
 
-## Phase 2: point the filter at the real fields
+To check what your own feed looks like without exposing anyone's data, tap **Sample
+schema** in the console. It returns field names, types and formats only. To see values
+of non-personal fields, list them under *Show values for fields*, e.g.
+`page_type, payment_status, page_slug`. Personal fields (email, names, address, phone,
+dedications...) are always blocked. If `EVENT_MATCH` is set, `current_filter` shows how
+the filter classifies each record in the window.
 
-Edit `src/fields.ts` so the real field names come first in each list (ID, time,
-email, amount, status, ticket type, event name...). Adjust `src/filter.ts` if tickets
-need a different rule. Commit, and Workers Builds redeploys.
+Before sending anything, tap **Dry run**. Each order appears as `would_send` (with its
+value and ticket count) or `would_skip` (with a reason). Donations are absent unless
+`TRACK` includes them.
 
-Then **Dry run** in the console. Your test ticket should appear as `would_send` with
-the right value, and the donation should be absent.
+## What is sent to Meta
+
+| Meta parameter | Value |
+|---|---|
+| Event Name | `Purchase` (tickets) or `Donate` (donations) |
+| Event ID | Give Lively `order_id` |
+| Event Time | Payment time |
+| Action Source | `website` (`META_ACTION_SOURCE`) |
+| Event Source URL | Give Lively `page_url` |
+| Value, Currency | Sum of the order's line items, `USD` |
+| Order ID | Give Lively `order_id` |
+| Content Name | Event or campaign name |
+| Content Category | `Event Ticket` or `Donation` |
+| Content Type, Content IDs | `product`, Give Lively `ticket_id`s (tickets only) |
+| Email, First Name, Last Name, Phone | SHA-256 hashed |
+| City, State, Zip Code, Country | SHA-256 hashed (`SEND_LOCATION`) |
+| Client User Agent | Not sent: Give Lively doesn't provide it |
 
 ## Test with Meta Test Events, then go live
 
-1. Set `META_TEST_EVENT_CODE` and `SEND_TO_META=true` in the dashboard.
+1. Set `EVENT_MATCH`, `META_PIXEL_ID`, `META_TEST_EVENT_CODE` and `SEND_TO_META=true`
+   in the dashboard.
 2. Buy a low-cost test ticket (complimentary tickets are excluded on purpose).
 3. Tap **Run now**. In Events Manager → **Test events**, confirm a Purchase with the
    right value and matched customer info.
@@ -150,8 +187,11 @@ events older than 7 days in any case, so this Worker skips them.
 | `META_API_VERSION` | `wrangler.jsonc` | `v26.0` | Graph API version |
 | `META_TEST_EVENT_CODE` | dashboard var | | Send to Test Events instead of production |
 | `META_ACTION_SOURCE` | dashboard var | `website` | Meta `action_source` |
-| `EVENT_MATCH` | dashboard var | | Case-insensitive substring identifying the event |
-| `EVENT_PAGE_URL` | dashboard var | | Sent as `event_source_url` |
+| `EVENT_MATCH` | dashboard var | | Case-insensitive substring of the page name, slug or URL |
+| `TRACK` | dashboard var | `tickets` | `tickets`, `donations` or `both` |
+| `VALUE_FIELD` | dashboard var | `original_amount` | Feed field used as the value |
+| `SEND_LOCATION` | dashboard var | `true` | Send hashed city/state/ZIP/country |
+| `EVENT_PAGE_URL` | dashboard var | record `page_url` | Override for `event_source_url` |
 | `CURRENCY` | dashboard var | `USD` | Purchase currency |
 | `SEND_TO_META` | dashboard var | off | `true` enables sending |
 | `OVERLAP_MS` | `wrangler.jsonc` | `600000` | Re-read window to catch late records |
@@ -169,9 +209,11 @@ The poll interval is `triggers.crons` in `wrangler.jsonc` (default every 5 minut
 - **Meta rejects the batch**: events are retried one by one. Accepted ones are saved
   as `sent`, invalid ones as `rejected`. If nothing in the run succeeds, an event is
   given up on only after 5 runs in a row.
-- **Ticket record that can't be mapped** (no email, too old, no timestamp): saved
+- **Order that can't be mapped** (no email, too old, no timestamp): saved
   once as `skipped` with a reason code, never retried.
 - **Pending payments** aren't recorded, so a sale sends once its status turns paid.
+- **A ticket that shows up after the rest of its order was sent** goes out as its own
+  Purchase with event ID `order_id:line_item_id`, so Meta doesn't drop it as a duplicate.
 - Overlapping runs (cron plus **Run now**) are prevented with a short D1 lock.
 
 ## Troubleshooting
@@ -195,9 +237,10 @@ with counts and reason codes only.
 
 ## Privacy
 
-- Sends only hashed email, first name, last name and phone, plus value, currency,
-  event name and ticket count.
-- D1 stores only IDs, timestamps, values and status codes.
+- Sends only hashed email, first name, last name, phone, city, state, ZIP and country
+  (location can be turned off with `SEND_LOCATION=false`), plus the order details in
+  the table above. No street address, dedications or payment details.
+- D1 stores only line item and order IDs, timestamps, values and status codes.
 - `/sample` returns field names and types, never values, unless you ask for specific
   non-personal fields.
 
@@ -214,7 +257,7 @@ Tests use fake data and an in-memory store; they don't need Cloudflare. Code:
 |---|---|
 | `src/index.ts` | `scheduled()` and `fetch()` entry points |
 | `src/poll.ts` | One run: fetch, filter, dedupe, send, record |
-| `src/fields.ts` | **Field name candidates.** Edit after discovery |
+| `src/fields.ts` | Give Lively field names |
 | `src/filter.ts` | `isTicketSale()` / `classify()` |
 | `src/map.ts` | Record → Meta event, hashing |
 | `src/meta.ts` | Conversions API client |
