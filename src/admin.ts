@@ -5,6 +5,7 @@ import { GiveLivelyError, fetchRecords } from "./giveLively";
 import { runPoll } from "./poll";
 import { describeSchema, describeShapes, distinctValues } from "./schema";
 import { CONSOLE_HTML } from "./console";
+import { runProbe } from "./probe";
 
 export const log = (event: string, data: Record<string, unknown> = {}) =>
   console.log(JSON.stringify({ event, ...data }));
@@ -41,7 +42,7 @@ export async function handleRequest(req: Request, env: Env): Promise<Response> {
     });
   }
 
-  const routes = ["/status", "/run", "/sample"];
+  const routes = ["/status", "/run", "/sample", "/probe"];
   if (!routes.includes(url.pathname)) return json({ error: "not found" }, 404);
 
   if (!cfg.adminToken) return json({ error: "ADMIN_TOKEN secret is not set" }, 503);
@@ -91,6 +92,13 @@ export async function handleRequest(req: Request, env: Env): Promise<Response> {
         : {}),
       ...summary,
     });
+  }
+
+  if (url.pathname === "/probe" && req.method === "GET") {
+    const missing = missingForFetch(cfg);
+    if (missing.length) return json({ error: `Missing settings: ${missing.join(", ")}` }, 400);
+    const ua = url.searchParams.get("ua") === "none" ? "none" : "worker";
+    return json(await runProbe(cfg, ua));
   }
 
   if (url.pathname === "/sample" && req.method === "GET") {

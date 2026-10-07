@@ -110,6 +110,10 @@ admin token once; the page remembers it in that browser only. Buttons:
   with no sending or saving.
 - **Run now**: runs one real poll (when `SEND_TO_META` is `true`).
 - **Sample schema**: field names and types from the Give Lively feed. No values.
+- **Test Give Lively**: calls the home page, the key-validation endpoint and the last
+  hour of the feed from the Worker, and reports status codes, whether DataDome answered,
+  timing and the Worker's outbound IP. The key and record values are never shown.
+  **Test, no User-Agent** repeats it without the Worker's User-Agent header.
 
 The page itself holds no data. Every endpoint needs `Authorization: Bearer <ADMIN_TOKEN>`.
 
@@ -231,6 +235,9 @@ protected by your API key, so ask Give Lively support to exempt it. You can send
 > `json_dataclips` paths from bot protection, or allowlist requests with the User-Agent
 > `givelively-capi-worker (+https://github.com/cobiadigital/givelively-facebook-pixel)`?
 > The endpoint is already protected by our API key.
+
+Tap **Test Give Lively** in the console to check whether the block applies to your
+Worker; the verdict line says "Blocked" or "Not blocked".
 
 This Worker doesn't try to get around the bot protection.
 

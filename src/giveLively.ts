@@ -1,4 +1,5 @@
 import type { GLRecord } from "./fields";
+import { WORKER_UA } from "./probe";
 
 export class GiveLivelyError extends Error {
   constructor(
@@ -40,7 +41,7 @@ export async function fetchRecords(
       headers: {
         accept: "application/json",
         // Identify this integration honestly so Give Lively can recognize (and allow) it.
-        "user-agent": "givelively-capi-worker (+https://github.com/cobiadigital/givelively-facebook-pixel)",
+        "user-agent": WORKER_UA,
       },
     });
   } catch {
