@@ -6,6 +6,8 @@ export interface Env {
   // Give Lively
   GL_ORG_ID?: string;
   GL_API_KEY?: string; // secret
+  /** Shareable event-ticketing CSV link. When set, it is used instead of the JSON feed. */
+  GL_CSV_URL?: string; // secret
 
   // Meta
   META_PIXEL_ID?: string;
@@ -34,6 +36,11 @@ export interface Env {
 export interface Config {
   glOrgId: string;
   glApiKey: string;
+  csvUrl: string;
+  /** "csv" when GL_CSV_URL is set, otherwise the Zapier JSON feed. */
+  source: "csv" | "json";
+  /** The CSV only holds one event's tickets, so EVENT_MATCH is optional there. */
+  allowEmptyMatch: boolean;
   metaPixelId: string;
   metaAccessToken: string;
   metaApiVersion: string;
@@ -67,9 +74,13 @@ function parseTrack(v: string | undefined): Kind[] {
 }
 
 export function loadConfig(env: Env): Config {
+  const csvUrl = clean(env.GL_CSV_URL);
   return {
     glOrgId: clean(env.GL_ORG_ID),
     glApiKey: clean(env.GL_API_KEY),
+    csvUrl,
+    source: csvUrl ? "csv" : "json",
+    allowEmptyMatch: !!csvUrl,
     metaPixelId: clean(env.META_PIXEL_ID),
     metaAccessToken: clean(env.META_ACCESS_TOKEN),
     metaApiVersion: clean(env.META_API_VERSION) || "v26.0",
@@ -91,6 +102,7 @@ export function loadConfig(env: Env): Config {
 /** Names of settings required to read from Give Lively. */
 export function missingForFetch(cfg: Config): string[] {
   const missing: string[] = [];
+  if (cfg.source === "csv") return missing;
   if (!cfg.glOrgId) missing.push("GL_ORG_ID");
   if (!cfg.glApiKey) missing.push("GL_API_KEY");
   return missing;
@@ -101,6 +113,6 @@ export function missingForSend(cfg: Config): string[] {
   const missing = missingForFetch(cfg);
   if (!cfg.metaPixelId) missing.push("META_PIXEL_ID");
   if (!cfg.metaAccessToken) missing.push("META_ACCESS_TOKEN");
-  if (!cfg.eventMatch) missing.push("EVENT_MATCH");
+  if (!cfg.eventMatch && !cfg.allowEmptyMatch) missing.push("EVENT_MATCH");
   return missing;
 }

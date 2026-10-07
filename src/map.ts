@@ -135,7 +135,11 @@ export async function toMetaEvent(
     custom_data.content_type = "product";
     const ids = [...new Set(lines.map((r) => pickText(r, FIELDS.ticketId)).filter((s): s is string => !!s))];
     if (ids.length) custom_data.content_ids = ids;
-    custom_data.num_items = lines.length;
+    // CSV rows carry a ticket count; JSON line items are one ticket each.
+    custom_data.num_items = lines.reduce((n, r) => {
+      const q = Number(pickText(r, FIELDS.quantity));
+      return n + (Number.isInteger(q) && q > 0 ? q : 1);
+    }, 0);
   } else {
     custom_data.content_category = "Donation";
   }

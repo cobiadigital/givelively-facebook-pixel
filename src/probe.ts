@@ -1,5 +1,9 @@
 import type { GiveLivelyConfig } from "./giveLively";
 
+export interface ProbeConfig extends GiveLivelyConfig {
+  csvUrl?: string;
+}
+
 /**
  * Diagnostics for GET /probe: call the Give Lively endpoints from the Worker and
  * report what came back. Never returns the API key, the full URLs or record values.
@@ -33,9 +37,9 @@ export interface ProbeReport {
   probes: ProbeResult[];
 }
 
-function redact(text: string, cfg: GiveLivelyConfig): string {
+function redact(text: string, cfg: ProbeConfig): string {
   let t = text;
-  for (const secret of [cfg.glApiKey, cfg.glOrgId]) {
+  for (const secret of [cfg.csvUrl, cfg.glApiKey, cfg.glOrgId]) {
     if (secret) t = t.split(secret).join("[redacted]");
     if (secret) t = t.split(encodeURIComponent(secret)).join("[redacted]");
   }
@@ -46,13 +50,14 @@ async function probe(
   name: string,
   url: string,
   target: string,
-  kind: "validate" | "data" | "page",
-  cfg: GiveLivelyConfig,
+  kind: "validate" | "data" | "page" | "csv",
+  cfg: ProbeConfig,
   ua: UaMode,
   fetchImpl: typeof fetch,
   now: () => number,
 ): Promise<ProbeResult> {
-  const headers: Record<string, string> = { accept: kind === "page" ? "text/html" : "application/json" };
+  const accept = kind === "page" ? "text/html" : kind === "csv" ? "text/csv" : "application/json";
+  const headers: Record<string, string> = { accept };
   if (ua === "worker") headers["user-agent"] = WORKER_UA;
   const t0 = now();
   let res: Response;
@@ -69,6 +74,13 @@ async function probe(
   let body: string;
   if (datadome && /captcha-delivery\.com/.test(text)) {
     body = "DataDome CAPTCHA challenge (no Give Lively response)";
+  } else if (kind === "csv" && res.ok) {
+    // Attendee data: report the row count and column names only.
+    const header = (text.replace(/^\uFEFF/, "").split(/\r?\n/, 1)[0] ?? "").slice(0, 2000);
+    const rows = text.split(/\r?\n/).filter((l) => l.trim()).length - 1;
+    body = /^\s*</.test(text)
+      ? "a web page, not CSV"
+      : `CSV with about ${Math.max(rows, 0)} row(s). Columns: ${header}`;
   } else if (kind === "data" && res.ok) {
     // The feed holds donor data: describe it, never echo it.
     try {
@@ -101,39 +113,68 @@ async function egress(fetchImpl: typeof fetch): Promise<ProbeReport["worker_egre
 }
 
 export async function runProbe(
-  cfg: GiveLivelyConfig,
+  cfg: ProbeConfig,
   ua: UaMode,
   fetchImpl: typeof fetch = fetch,
   now: () => number = Date.now,
 ): Promise<ProbeReport> {
-  const org = encodeURIComponent(cfg.glOrgId);
-  const key = encodeURIComponent(cfg.glApiKey);
   const base = "https://secure.givelively.org";
-  const since = now() - 3600 * 1000;
-
-  const probes = await Promise.all([
+  const jobs: Promise<ProbeResult>[] = [
     probe("home page (no key)", `${base}/`, `${base}/`, "page", cfg, ua, fetchImpl, now),
-    probe(
-      "validate key",
-      `${base}/nonprofits/${org}/json_dataclips/validate/${key}.json`,
-      `${base}/nonprofits/{ORG_ID}/json_dataclips/validate/{API_KEY}.json`,
-      "validate", cfg, ua, fetchImpl, now,
-    ),
-    probe(
-      "donation feed (last hour)",
-      `${base}/nonprofits/${org}/json_dataclips/${key}.json?start_time_ms=${since}`,
-      `${base}/nonprofits/{ORG_ID}/json_dataclips/{API_KEY}.json?start_time_ms=…`,
-      "data", cfg, ua, fetchImpl, now,
-    ),
-  ]);
+  ];
+  if (cfg.csvUrl) {
+    jobs.push(probe("CSV link (GL_CSV_URL)", cfg.csvUrl, "{GL_CSV_URL}", "csv", cfg, ua, fetchImpl, now));
+  }
+  const hasJson = !!(cfg.glOrgId && cfg.glApiKey);
+  if (hasJson) {
+    const org = encodeURIComponent(cfg.glOrgId);
+    const key = encodeURIComponent(cfg.glApiKey);
+    const since = now() - 3600 * 1000;
+    jobs.push(
+      probe(
+        "validate key",
+        `${base}/nonprofits/${org}/json_dataclips/validate/${key}.json`,
+        `${base}/nonprofits/{ORG_ID}/json_dataclips/validate/{API_KEY}.json`,
+        "validate", cfg, ua, fetchImpl, now,
+      ),
+      probe(
+        "donation feed (last hour)",
+        `${base}/nonprofits/${org}/json_dataclips/${key}.json?start_time_ms=${since}`,
+        `${base}/nonprofits/{ORG_ID}/json_dataclips/{API_KEY}.json?start_time_ms=…`,
+        "data", cfg, ua, fetchImpl, now,
+      ),
+    );
+  }
+  const probes = await Promise.all(jobs);
+  const byName = (n: string) => probes.find((p) => p.name.startsWith(n));
 
-  const [, validate, data] = probes as [ProbeResult, ProbeResult, ProbeResult];
-  let verdict: string;
-  if (validate.ok && data.ok) verdict = "Not blocked: the key validates and the feed returned data.";
-  else if (validate.datadome || data.datadome) {
-    verdict = "Blocked: DataDome bot protection answered instead of Give Lively.";
-  } else if (validate.status === 404) verdict = "Reached Give Lively, but the org ID or API key is wrong (404).";
-  else verdict = "Inconclusive: see the individual results.";
+  const verdicts: string[] = [];
+  const csv = byName("CSV link");
+  if (csv) {
+    verdicts.push(
+      csv.ok && csv.body.startsWith("CSV")
+        ? "CSV link: works."
+        : csv.datadome
+          ? "CSV link: blocked by DataDome."
+          : csv.status === 404
+            ? "CSV link: not found (404). Check GL_CSV_URL."
+            : "CSV link: failed; see its result.",
+    );
+  }
+  const validate = byName("validate key");
+  const data = byName("donation feed");
+  if (validate && data) {
+    verdicts.push(
+      validate.ok && data.ok
+        ? "JSON feed: not blocked; the key validates and the feed returned data."
+        : validate.datadome || data.datadome
+          ? "JSON feed: blocked by DataDome bot protection."
+          : validate.status === 404
+            ? "JSON feed: reached Give Lively, but the org ID or API key is wrong (404)."
+            : "JSON feed: inconclusive; see the individual results.",
+    );
+  }
+  if (!verdicts.length) verdicts.push("Nothing to test: set GL_CSV_URL, or GL_ORG_ID and GL_API_KEY.");
 
-  return { user_agent: ua, verdict, worker_egress: await egress(fetchImpl), probes };
+  return { user_agent: ua, verdict: verdicts.join(" "), worker_egress: await egress(fetchImpl), probes };
 }
