@@ -47,7 +47,15 @@ export const CONSOLE_HTML = `<!doctype html>
   </div>
 
   <div class="card">
-    <label for="hours">Sample window (hours)</label>
+    <label>Test the Give Lively endpoints from this Worker</label>
+    <div class="row">
+      <button class="primary" data-act="probe">Test Give Lively</button>
+      <button data-act="probe-noua">Test, no User-Agent</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <label for="hours">Look-back window in hours (Sample and Dry run)</label>
     <input id="hours" type="number" inputmode="numeric" value="24" min="1">
     <label for="values">Show values for fields (comma separated, optional)</label>
     <input id="values" type="text" placeholder="e.g. status, line_item_type, event_name" autocapitalize="off" autocorrect="off">
@@ -92,7 +100,9 @@ export const CONSOLE_HTML = `<!doctype html>
     const act = ev.target && ev.target.dataset && ev.target.dataset.act;
     if (!act) return;
     if (act === "status") call("GET", "/status");
-    if (act === "dry") call("POST", "/run?dry=1");
+    if (act === "probe") call("GET", "/probe");
+    if (act === "probe-noua") call("GET", "/probe?ua=none");
+    if (act === "dry") call("POST", "/run?dry=1&hours=" + encodeURIComponent($("hours").value || "24"));
     if (act === "run" && confirm("Run one poll now? If sending is enabled, new ticket sales go to Meta.")) call("POST", "/run");
     if (act === "forget") { store.clear(); $("token").value = ""; $("state").textContent = "Token forgotten."; }
     if (act === "sample") {

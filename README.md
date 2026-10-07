@@ -53,7 +53,8 @@ to one organization; your details all go into the dashboard.
 
 1. Cloudflare dashboard → **Workers & Pages** → **Create** → **Import a repository**.
 2. Pick this GitHub repo.
-3. **Project name: `givelively-capi`**. It must match `"name"` in `wrangler.jsonc`.
+3. **Project name: `givelively-facebook-pixel`**. It should match `"name"` in `wrangler.jsonc`
+   (edit that file if you pick a different name).
 4. Leave the build command empty. Keep the deploy command `npx wrangler deploy`.
 5. **Save and Deploy**.
 
@@ -101,13 +102,18 @@ dashboard value on every deploy, so change those three by editing the file.
 
 ### 5. Open the admin console
 
-Visit `https://givelively-capi.<your-subdomain>.workers.dev/` on your phone. Paste your
+Visit `https://givelively-facebook-pixel.<your-subdomain>.workers.dev/` on your phone. Paste your
 admin token once; the page remembers it in that browser only. Buttons:
 
 - **Status**: last run, cursor, counts, the last 10 event IDs, and any missing settings.
-- **Dry run**: shows what the next poll would send, with no sending or saving.
+- **Dry run**: shows what would be sent from the look-back window (default 24 hours),
+  with no sending or saving.
 - **Run now**: runs one real poll (when `SEND_TO_META` is `true`).
 - **Sample schema**: field names and types from the Give Lively feed. No values.
+- **Test Give Lively**: calls the home page, the key-validation endpoint and the last
+  hour of the feed from the Worker, and reports status codes, whether DataDome answered,
+  timing and the Worker's outbound IP. The key and record values are never shown.
+  **Test, no User-Agent** repeats it without the Worker's User-Agent header.
 
 The page itself holds no data. Every endpoint needs `Authorization: Bearer <ADMIN_TOKEN>`.
 
@@ -217,6 +223,23 @@ The poll interval is `triggers.crons` in `wrangler.jsonc` (default every 5 minut
 - Overlapping runs (cron plus **Run now**) are prevented with a short D1 lock.
 
 ## Troubleshooting
+
+**"Give Lively's bot protection (DataDome) blocked the request (HTTP 403)".**
+Give Lively's site sits behind DataDome, which blocks requests from cloud servers,
+including Cloudflare Workers. The JSON feed is meant for integrations and is already
+protected by your API key, so ask Give Lively support to exempt it. You can send:
+
+> We use the Zapier JSON endpoints (`/nonprofits/{id}/json_dataclips/...json`) from our
+> own server, a Cloudflare Worker, to send ticket sales to the Meta Conversions API.
+> Requests get HTTP 403 from DataDome (`x-datadome: protected`). Could you exempt the
+> `json_dataclips` paths from bot protection, or allowlist requests with the User-Agent
+> `givelively-capi-worker (+https://github.com/cobiadigital/givelively-facebook-pixel)`?
+> The endpoint is already protected by our API key.
+
+Tap **Test Give Lively** in the console to check whether the block applies to your
+Worker; the verdict line says "Blocked" or "Not blocked".
+
+This Worker doesn't try to get around the bot protection.
 
 **First deploy fails creating the D1 database.** Automatic provisioning needs Wrangler
 4.45+ (the repo pins it). If it still fails, create a database in the dashboard

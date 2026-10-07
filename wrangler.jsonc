@@ -1,7 +1,7 @@
 {
   "$schema": "./node_modules/wrangler/config-schema.json",
   // Must match the Worker name you pick when connecting the repo in Workers Builds.
-  "name": "givelively-capi",
+  "name": "givelively-facebook-pixel",
   "main": "src/index.ts",
   "compatibility_date": "2026-10-01",
 
@@ -20,6 +20,7 @@
   "d1_databases": [
     {
       "binding": "DB",
+      // Keep this name once deployed: changing it makes Wrangler create a new, empty database.
       "database_name": "givelively-capi"
     }
   ],

@@ -213,3 +213,24 @@ describe("runPoll", () => {
     expect(JSON.stringify([s, x.logs])).not.toContain("SECRETKEY123");
   });
 });
+
+describe("dry run window and Give Lively blocks", () => {
+  it("dry run can look back a set number of hours", async () => {
+    const x = setup([]);
+    await runPoll(config(), x.deps, { trigger: "manual", dryRun: true, windowHours: 48 });
+    expect(Number(new URL(x.f.calls[0]!.url).searchParams.get("start_time_ms"))).toBe(NOW - 48 * 3600_000);
+  });
+
+  it("windowHours is ignored for real runs", async () => {
+    const x = setup([]);
+    await runPoll(config(), x.deps, { trigger: "manual", dryRun: false, windowHours: 48 });
+    expect(Number(new URL(x.f.calls[0]!.url).searchParams.get("start_time_ms"))).toBe(NOW);
+  });
+
+  it("names a DataDome block clearly", async () => {
+    const x = setup(() => new Response("{}", { status: 403, headers: { "x-datadome": "protected" } }));
+    const s = await run(x.deps);
+    expect(s.error).toMatch(/^Give Lively's bot protection \(DataDome\) blocked the request \(HTTP 403\)/);
+    expect(s.cursor_advanced).toBe(false);
+  });
+});

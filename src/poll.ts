@@ -24,6 +24,8 @@ export interface Deps {
 export interface RunOptions {
   trigger: "cron" | "manual";
   dryRun: boolean;
+  /** Dry runs only: look back this many hours instead of using the cursor. */
+  windowHours?: number;
 }
 
 export interface PreviewRow {
@@ -130,7 +132,11 @@ export async function runPoll(cfg: Config, deps: Deps, opts: RunOptions): Promis
   try {
     const cursor = Number(await deps.store.getState("cursor_ms"));
     const windowStart =
-      cursor > 0 ? cursor - cfg.overlapMs : startMs - cfg.backfillHours * 3600 * 1000;
+      opts.dryRun && opts.windowHours
+        ? startMs - opts.windowHours * 3600 * 1000
+        : cursor > 0
+          ? cursor - cfg.overlapMs
+          : startMs - cfg.backfillHours * 3600 * 1000;
     s.window_start = iso(windowStart);
 
     const records = await fetchRecords(cfg, windowStart, deps.fetch);
