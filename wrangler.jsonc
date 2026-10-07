@@ -1,0 +1,39 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  // Must match the Worker name you pick when connecting the repo in Workers Builds.
+  "name": "givelively-capi",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-01",
+
+  // Keep the variables you set in the dashboard (org ID, pixel ID, event match,
+  // test code, etc.) across deploys. Without this, every GitHub push would wipe them.
+  // Secrets are never wiped by a deploy either way.
+  "keep_vars": true,
+
+  "triggers": {
+    // Poll interval. Edit and commit to change it.
+    "crons": ["*/5 * * * *"]
+  },
+
+  // No database_id on purpose: Wrangler (4.45+) creates the D1 database on the
+  // first deploy and keeps it linked, so this repo carries no account-specific IDs.
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "givelively-capi"
+    }
+  ],
+
+  // Generic, non-private defaults only. Anything that identifies your organization
+  // (GL_ORG_ID, META_PIXEL_ID, EVENT_MATCH, EVENT_PAGE_URL) is set in the dashboard.
+  // Note: a variable defined here overrides the dashboard value on every deploy.
+  "vars": {
+    "META_API_VERSION": "v26.0",
+    "OVERLAP_MS": "600000",
+    "BACKFILL_HOURS": "0"
+  },
+
+  "observability": {
+    "enabled": true
+  }
+}

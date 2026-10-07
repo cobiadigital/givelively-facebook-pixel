@@ -1,0 +1,19 @@
+{
+  "name": "givelively-capi-worker",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Cloudflare Worker that polls Give Lively for event ticket sales and reports them to the Meta Conversions API as Purchase events.",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "check": "tsc --noEmit && vitest run"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261001.0",
+    "typescript": "^5.9.0",
+    "vitest": "^3.2.0",
+    "wrangler": "^4.45.0"
+  }
+}
