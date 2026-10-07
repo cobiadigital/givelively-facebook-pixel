@@ -1,3 +1,5 @@
+import type { Kind } from "./filter";
+
 export interface Env {
   DB: D1Database;
 
@@ -18,6 +20,9 @@ export interface Env {
   CURRENCY?: string;
 
   // Behavior
+  TRACK?: string;
+  VALUE_FIELD?: string;
+  SEND_LOCATION?: string;
   SEND_TO_META?: string;
   OVERLAP_MS?: string;
   BACKFILL_HOURS?: string;
@@ -37,6 +42,9 @@ export interface Config {
   eventMatch: string;
   eventPageUrl: string;
   currency: string;
+  track: Kind[];
+  valueField: string;
+  sendLocation: boolean;
   sendEnabled: boolean;
   overlapMs: number;
   backfillHours: number;
@@ -48,6 +56,14 @@ const clean = (v: string | undefined): string => (v ?? "").trim();
 function num(v: string | undefined, fallback: number): number {
   const n = Number(clean(v));
   return clean(v) !== "" && Number.isFinite(n) && n >= 0 ? n : fallback;
+}
+
+/** TRACK: "tickets" (default), "donations" or "both". */
+function parseTrack(v: string | undefined): Kind[] {
+  const t = clean(v).toLowerCase();
+  if (t === "both" || t === "all") return ["ticket", "donation"];
+  if (t === "donations" || t === "donation") return ["donation"];
+  return ["ticket"];
 }
 
 export function loadConfig(env: Env): Config {
@@ -62,6 +78,9 @@ export function loadConfig(env: Env): Config {
     eventMatch: clean(env.EVENT_MATCH),
     eventPageUrl: clean(env.EVENT_PAGE_URL),
     currency: (clean(env.CURRENCY) || "USD").toUpperCase(),
+    track: parseTrack(env.TRACK),
+    valueField: clean(env.VALUE_FIELD) || "original_amount",
+    sendLocation: clean(env.SEND_LOCATION).toLowerCase() !== "false",
     sendEnabled: clean(env.SEND_TO_META).toLowerCase() === "true",
     overlapMs: num(env.OVERLAP_MS, 600_000),
     backfillHours: num(env.BACKFILL_HOURS, 0),
@@ -83,6 +102,5 @@ export function missingForSend(cfg: Config): string[] {
   if (!cfg.metaPixelId) missing.push("META_PIXEL_ID");
   if (!cfg.metaAccessToken) missing.push("META_ACCESS_TOKEN");
   if (!cfg.eventMatch) missing.push("EVENT_MATCH");
-  if (!cfg.eventPageUrl) missing.push("EVENT_PAGE_URL");
   return missing;
 }

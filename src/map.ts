@@ -1,25 +1,57 @@
 import { FIELDS, parseTimeMs, pick, pickAmount, pickText, type GLRecord } from "./fields";
-import { normalizeEmail, normalizeName, normalizePhone, sha256Hex } from "./hash";
+import type { Kind } from "./filter";
+import { valueFields } from "./filter";
+import {
+  normalizeCity,
+  normalizeCountry,
+  normalizeEmail,
+  normalizeName,
+  normalizePhone,
+  normalizeState,
+  normalizeZip,
+  sha256Hex,
+} from "./hash";
 
 export interface MapConfig {
   eventPageUrl: string;
   currency: string;
   actionSource: string;
+  valueField: string;
+  /** Include hashed city, state, zip and country (SEND_LOCATION). */
+  sendLocation: boolean;
 }
 
+type Hashed = string[];
+
 export interface MetaEvent {
-  event_name: "Purchase";
+  event_name: "Purchase" | "Donate";
   event_time: number;
   event_id: string;
   action_source: string;
   event_source_url?: string;
-  user_data: { em: string[]; fn?: string[]; ln?: string[]; ph?: string[] };
-  custom_data: { value: number; currency: string; content_name?: string; num_items?: number };
+  user_data: {
+    em: Hashed;
+    fn?: Hashed;
+    ln?: Hashed;
+    ph?: Hashed;
+    ct?: Hashed;
+    st?: Hashed;
+    zp?: Hashed;
+    country?: Hashed;
+  };
+  custom_data: {
+    value: number;
+    currency: string;
+    order_id?: string;
+    content_name?: string;
+    content_category?: string;
+    content_type?: "product";
+    content_ids?: string[];
+    num_items?: number;
+  };
 }
 
-export type MapResult =
-  | { ok: true; id: string; value: number; event: MetaEvent }
-  | { ok: false; id?: string; reason: string };
+export type MapResult = { ok: true; value: number; event: MetaEvent } | { ok: false; reason: string };
 
 /** Meta accepts events up to 7 days old. Keep a small safety margin. */
 export const MAX_EVENT_AGE_MS = 7 * 24 * 3600 * 1000 - 10 * 60 * 1000;
@@ -30,63 +62,94 @@ function splitFullName(full: string): { first?: string; last?: string } {
   return { first: parts[0], last: parts.slice(1).join(" ") };
 }
 
+async function hashed(value: string | undefined): Promise<Hashed | undefined> {
+  return value ? [await sha256Hex(value)] : undefined;
+}
+
 /**
- * Turn a qualifying Give Lively record into a Meta Purchase event. PII is hashed
- * here and never leaves this function unhashed. Failure reasons are short codes.
+ * Turn the line items of one order (all the same kind) into a single Meta event:
+ * Purchase for tickets, Donate for donations. Value is the sum of the line items.
+ *
+ * PII is hashed here and never leaves this function unhashed. Failure reasons are
+ * short codes.
  */
 export async function toMetaEvent(
-  record: GLRecord,
+  lines: GLRecord[],
+  kind: Kind,
+  eventId: string,
   cfg: MapConfig,
   nowMs: number,
 ): Promise<MapResult> {
-  const id = pickText(record, FIELDS.id);
-  if (!id) return { ok: false, reason: "no_id" };
+  const first = lines[0];
+  if (!first) return { ok: false, reason: "empty_order" };
 
-  const timeMs = parseTimeMs(pick(record, FIELDS.time)?.value);
-  if (timeMs === undefined) return { ok: false, id, reason: "no_time" };
-  if (nowMs - timeMs > MAX_EVENT_AGE_MS) return { ok: false, id, reason: "too_old" };
+  const times = lines.map((r) => parseTimeMs(pick(r, FIELDS.time)?.value));
+  if (times.some((t) => t === undefined)) return { ok: false, reason: "no_time" };
+  const timeMs = Math.min(...(times as number[]));
+  if (nowMs - timeMs > MAX_EVENT_AGE_MS) return { ok: false, reason: "too_old" };
 
-  const value = pickAmount(record, FIELDS.amount);
-  if (value === undefined || value <= 0) return { ok: false, id, reason: "zero_amount" };
-
-  const email = normalizeEmail(pickText(record, FIELDS.email) ?? "");
-  if (!email) return { ok: false, id, reason: "no_email" };
-
-  let first = pickText(record, FIELDS.firstName);
-  let last = pickText(record, FIELDS.lastName);
-  if (!first && !last) {
-    const full = pickText(record, FIELDS.fullName);
-    if (full) ({ first, last } = splitFullName(full));
+  let value = 0;
+  for (const r of lines) {
+    const v = pickAmount(r, valueFields(cfg));
+    if (v === undefined || v <= 0) return { ok: false, reason: "zero_amount" };
+    value += v;
   }
-  const fn = first ? normalizeName(first) : undefined;
-  const ln = last ? normalizeName(last) : undefined;
-  const ph = normalizePhone(pickText(record, FIELDS.phone) ?? "");
+  value = Math.round(value * 100) / 100;
+
+  const email = normalizeEmail(pickText(first, FIELDS.email) ?? "");
+  if (!email) return { ok: false, reason: "no_email" };
+
+  let firstName = pickText(first, FIELDS.firstName);
+  let lastName = pickText(first, FIELDS.lastName);
+  if (!firstName && !lastName) {
+    const full = pickText(first, FIELDS.fullName);
+    if (full) ({ first: firstName, last: lastName } = splitFullName(full));
+  }
 
   const user_data: MetaEvent["user_data"] = { em: [await sha256Hex(email)] };
-  if (fn) user_data.fn = [await sha256Hex(fn)];
-  if (ln) user_data.ln = [await sha256Hex(ln)];
-  if (ph) user_data.ph = [await sha256Hex(ph)];
+  const optional: [keyof MetaEvent["user_data"], string | undefined][] = [
+    ["fn", firstName ? normalizeName(firstName) : undefined],
+    ["ln", lastName ? normalizeName(lastName) : undefined],
+    ["ph", normalizePhone(pickText(first, FIELDS.phone) ?? "")],
+  ];
+  if (cfg.sendLocation) {
+    optional.push(
+      ["ct", normalizeCity(pickText(first, FIELDS.city) ?? "")],
+      ["st", normalizeState(pickText(first, FIELDS.state) ?? "")],
+      ["zp", normalizeZip(pickText(first, FIELDS.zip) ?? "")],
+      ["country", normalizeCountry(pickText(first, FIELDS.country) ?? "")],
+    );
+  }
+  for (const [key, v] of optional) {
+    const h = await hashed(v);
+    if (h) user_data[key] = h;
+  }
 
   const custom_data: MetaEvent["custom_data"] = { value, currency: cfg.currency };
-  const eventName = pickText(record, FIELDS.event.slice(0, 7));
-  if (eventName) custom_data.content_name = eventName.slice(0, 200);
-  const qtyHit = pick(record, FIELDS.quantity);
-  const qty = Number(qtyHit?.value);
-  if (Number.isInteger(qty) && qty > 0) custom_data.num_items = qty;
-  else {
-    const tickets = pick(record, FIELDS.ticket)?.value;
-    if (Array.isArray(tickets)) custom_data.num_items = tickets.length;
+  const orderId = pickText(first, FIELDS.orderId);
+  if (orderId) custom_data.order_id = orderId;
+  const contentName = pickText(first, FIELDS.contentName);
+  if (contentName) custom_data.content_name = contentName.slice(0, 200);
+  if (kind === "ticket") {
+    custom_data.content_category = "Event Ticket";
+    custom_data.content_type = "product";
+    const ids = [...new Set(lines.map((r) => pickText(r, FIELDS.ticketId)).filter((s): s is string => !!s))];
+    if (ids.length) custom_data.content_ids = ids;
+    custom_data.num_items = lines.length;
+  } else {
+    custom_data.content_category = "Donation";
   }
 
   const event: MetaEvent = {
-    event_name: "Purchase",
+    event_name: kind === "ticket" ? "Purchase" : "Donate",
     event_time: Math.floor(Math.min(timeMs, nowMs) / 1000),
-    event_id: id,
+    event_id: eventId,
     action_source: cfg.actionSource,
     user_data,
     custom_data,
   };
-  if (cfg.eventPageUrl) event.event_source_url = cfg.eventPageUrl;
+  const url = pickText(first, FIELDS.pageUrl) || cfg.eventPageUrl;
+  if (url) event.event_source_url = url;
 
-  return { ok: true, id, value, event };
+  return { ok: true, value, event };
 }

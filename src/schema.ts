@@ -152,7 +152,7 @@ export function distinctValues(
     let truncated = false;
     for (const r of records) {
       for (const v of getPath(r, path)) {
-        if (v !== null && typeof v === "object") continue;
+        if (v === undefined || (v !== null && typeof v === "object")) continue;
         let s = String(v);
         const isDate = /^\d{4}-\d{2}-\d{2}/.test(s);
         if (/@/.test(s) || (!isDate && /\d[\d\s().-]{8,}\d/.test(s))) s = "[hidden]";
