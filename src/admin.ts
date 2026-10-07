@@ -1,7 +1,8 @@
 import { loadConfig, missingForFetch, missingForSend, type Env } from "./config";
 import { D1Store } from "./db";
 import { classify } from "./filter";
-import { GiveLivelyError, fetchRecords } from "./giveLively";
+import { GiveLivelyError } from "./giveLively";
+import { loadRecords } from "./source";
 import { runPoll } from "./poll";
 import { describeSchema, describeShapes, distinctValues } from "./schema";
 import { CONSOLE_HTML } from "./console";
@@ -60,6 +61,7 @@ export async function handleRequest(req: Request, env: Env): Promise<Response> {
     ]);
     return json({
       now: new Date().toISOString(),
+      source: cfg.source === "csv" ? "csv link (GL_CSV_URL)" : "zapier json feed",
       send_to_meta: cfg.sendEnabled,
       test_events_mode: !!cfg.metaTestEventCode,
       track: cfg.track,
@@ -113,7 +115,7 @@ export async function handleRequest(req: Request, env: Env): Promise<Response> {
 
     let records;
     try {
-      records = await fetchRecords(cfg, Date.now() - hours * 3600 * 1000);
+      records = await loadRecords(cfg, Date.now() - hours * 3600 * 1000);
     } catch (e) {
       return json({ error: e instanceof GiveLivelyError ? e.message : "fetch failed" }, 502);
     }

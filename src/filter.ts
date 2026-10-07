@@ -6,6 +6,8 @@ export type Kind = "ticket" | "donation";
 export interface FilterConfig {
   /** Case-insensitive substring of the page/event/campaign name, slug or URL. */
   eventMatch: string;
+  /** When true, an empty eventMatch matches everything (single-event CSV source). */
+  allowEmptyMatch?: boolean;
   /** Which kinds to send (TRACK setting). */
   track: readonly Kind[];
   /** Field holding the value (VALUE_FIELD), tried before the defaults. */
@@ -30,7 +32,7 @@ export function valueFields(cfg: Pick<FilterConfig, "valueField">): string[] {
  */
 export function classify(record: GLRecord, cfg: FilterConfig): FilterResult {
   const match = cfg.eventMatch.trim().toLowerCase();
-  if (!match) return { ok: false, reason: "event_match_not_set" };
+  if (!match && !cfg.allowEmptyMatch) return { ok: false, reason: "event_match_not_set" };
 
   // 1. Tickets have a ticket_id. Everything else is a donation.
   const kind = kindOf(record);
@@ -38,7 +40,7 @@ export function classify(record: GLRecord, cfg: FilterConfig): FilterResult {
 
   // 2. Belongs to the target page/event/campaign.
   const haystack = allText(record, FIELDS.match).join(" | ").toLowerCase();
-  if (!haystack.includes(match)) return { ok: false, reason: "other_page" };
+  if (match && !haystack.includes(match)) return { ok: false, reason: "other_page" };
 
   // 3. Paid, and not refunded or disputed.
   const status = (pickText(record, FIELDS.status) ?? "").toLowerCase();

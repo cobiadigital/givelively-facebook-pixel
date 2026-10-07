@@ -2,8 +2,9 @@ import { missingForFetch, missingForSend, type Config } from "./config";
 import type { FinalRow, Store } from "./db";
 import { FIELDS, pickAmount, pickText, type GLRecord } from "./fields";
 import { classify, valueFields, type Kind } from "./filter";
-import { GiveLivelyError, fetchRecords } from "./giveLively";
-import { toMetaEvent, type MetaEvent } from "./map";
+import { GiveLivelyError } from "./giveLively";
+import { MAX_EVENT_AGE_MS, toMetaEvent, type MetaEvent } from "./map";
+import { loadRecords } from "./source";
 import { sendEvents } from "./meta";
 
 /** Meta accepts up to 1000 events per request. Stay well below. */
@@ -131,15 +132,27 @@ export async function runPoll(cfg: Config, deps: Deps, opts: RunOptions): Promis
 
   try {
     const cursor = Number(await deps.store.getState("cursor_ms"));
-    const windowStart =
-      opts.dryRun && opts.windowHours
-        ? startMs - opts.windowHours * 3600 * 1000
-        : cursor > 0
-          ? cursor - cfg.overlapMs
-          : startMs - cfg.backfillHours * 3600 * 1000;
+    // origin: the earliest purchase time this Worker will ever send. Set on the
+    // first run so launching doesn't send old sales (BACKFILL_HOURS opts in).
+    let origin = Number(await deps.store.getState("origin_ms"));
+    if (!(origin > 0)) {
+      origin = cursor > 0 ? cursor : startMs - cfg.backfillHours * 3600 * 1000;
+      if (!opts.dryRun) await deps.store.setState({ origin_ms: String(origin) });
+    }
+    let windowStart: number;
+    if (opts.dryRun && opts.windowHours) {
+      windowStart = startMs - opts.windowHours * 3600 * 1000;
+    } else if (cfg.source === "csv") {
+      // The CSV is filtered by purchase time, which doesn't change when a pending
+      // payment succeeds. So look back as far as Meta accepts, never before origin;
+      // dedupe skips rows already handled.
+      windowStart = Math.max(origin - cfg.overlapMs, startMs - MAX_EVENT_AGE_MS);
+    } else {
+      windowStart = cursor > 0 ? cursor - cfg.overlapMs : origin;
+    }
     s.window_start = iso(windowStart);
 
-    const records = await fetchRecords(cfg, windowStart, deps.fetch);
+    const records = await loadRecords(cfg, windowStart, deps.fetch);
     s.fetched = records.length;
 
     // 1. Filter line items. The feed can repeat a record, so keep the first copy of each.

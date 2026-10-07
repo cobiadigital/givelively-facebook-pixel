@@ -1,8 +1,8 @@
 # Give Lively → Meta Conversions API (Cloudflare Worker)
 
 Give Lively hosts its own checkout, so you can't put a Meta Pixel on it. This Worker
-closes that gap: every few minutes it polls Give Lively's JSON feed (the same one that
-powers its Zapier integration), picks out paid **ticket sales for one event**, and sends
+closes that gap: every few minutes it reads your event's **shareable ticket CSV link**
+(or Give Lively's Zapier JSON feed), picks out paid **ticket sales for one event**, and sends
 each order to Meta as a server-side **Purchase** event. Facebook and Instagram campaigns can
 then optimize for, and report on, real ticket sales. It can also send donations to a
 campaign as **Donate** events (`TRACK=donations` or `both`).
@@ -21,7 +21,7 @@ phone using the Cloudflare dashboard.
 ## How it works
 
 ```
-Cron (every 5 min) ─► fetch Give Lively feed since last run (minus 10 min overlap)
+Cron (every 5 min) ─► fetch the CSV link (last 7 days) or JSON feed (since last run)
                    ─► keep paid tickets for EVENT_MATCH       (src/filter.ts)
                    ─► drop line items already sent            (D1)
                    ─► group by order, map + hash              (src/map.ts)
@@ -44,7 +44,8 @@ to one organization; your details all go into the dashboard.
 
 | What | Where |
 |---|---|
-| **Give Lively org ID and API key** | Give Lively Nonprofit Admin Portal → Integrations → Zapier → create an API key. The portal shows both values. |
+| **Event ticket CSV link** (recommended) | Give Lively Nonprofit Admin Portal → your event → ticketing reports → the shareable CSV ("dataclip") link. It ends in `/dataclips/<id>.csv`. |
+| *or* **Give Lively org ID and API key** | Admin Portal → Integrations → Zapier → create an API key. Note: this JSON feed is behind Give Lively's bot protection and may be blocked from Cloudflare (see [Troubleshooting](#troubleshooting)). |
 | **Meta Pixel (dataset) ID** | Meta Events Manager → Data sources → your pixel → the ID under its name. |
 | **Meta access token** | Events Manager → your pixel → Settings → Conversions API → *Generate access token*. |
 | **Admin token** | Any long random string. Generate one in your password manager and save it there. |
@@ -70,7 +71,8 @@ kept across deploys.
 
 | Name | Value |
 |---|---|
-| `GL_API_KEY` | Give Lively Zapier API key |
+| `GL_CSV_URL` | The event's shareable CSV link. **Treat it as a password**: anyone with it can download your attendee list. |
+| `GL_API_KEY` | Only if using the JSON feed instead: Give Lively Zapier API key |
 | `META_ACCESS_TOKEN` | Meta Conversions API token |
 | `ADMIN_TOKEN` | Your admin token |
 
@@ -78,8 +80,9 @@ kept across deploys.
 
 | Name | Value | Needed for |
 |---|---|---|
-| `GL_ORG_ID` | Give Lively org ID | Reading the feed |
-| `EVENT_MATCH` | Text found in the page name, slug or URL, e.g. `art-soup-2026-tickets` (case-insensitive) | Sending |
+| `EVENT_PAGE_URL` | Public ticket page URL (the CSV has no page URL; Meta wants one) | Sending |
+| `EVENT_MATCH` | JSON feed: text in the page name, slug or URL, e.g. `art-soup-2026-tickets`. CSV: optional, since the link is for one event | Sending (JSON) |
+| `GL_ORG_ID` | Only for the JSON feed: Give Lively org ID | Reading (JSON) |
 | `META_PIXEL_ID` | Pixel/dataset ID | Sending |
 | `META_TEST_EVENT_CODE` | From Events Manager → Test events. Delete it to go live. | Testing |
 | `SEND_TO_META` | `true` to start sending. Leave it unset until testing. | Sending |
@@ -89,9 +92,9 @@ Optional:
 | Name | Default | Purpose |
 |---|---|---|
 | `TRACK` | `tickets` | `tickets` (Purchase), `donations` (Donate) or `both` |
-| `VALUE_FIELD` | `original_amount` | `original_amount` = ticket price; `gross_amount` = what the buyer paid incl. fees they chose to cover; `net_amount` = after fees |
+| `VALUE_FIELD` | `original_amount` | JSON feed: `original_amount` = ticket price; `gross_amount` = incl. fees the buyer covered; `net_amount` = after fees. The CSV uses `Amount Spent` |
 | `SEND_LOCATION` | `true` | `false` stops sending hashed city/state/ZIP/country |
-| `EVENT_PAGE_URL` | the record's `page_url` | Override for `event_source_url` |
+
 | `CURRENCY` | `USD` | Purchase currency |
 | `META_ACTION_SOURCE` | `website` | See [Troubleshooting](#troubleshooting) |
 
@@ -110,14 +113,40 @@ admin token once; the page remembers it in that browser only. Buttons:
   with no sending or saving.
 - **Run now**: runs one real poll (when `SEND_TO_META` is `true`).
 - **Sample schema**: field names and types from the Give Lively feed. No values.
-- **Test Give Lively**: calls the home page, the key-validation endpoint and the last
-  hour of the feed from the Worker, and reports status codes, whether DataDome answered,
-  timing and the Worker's outbound IP. The key and record values are never shown.
+- **Test Give Lively**: calls the home page, the CSV link and/or the JSON key-validation
+  endpoint and feed from the Worker, and reports status codes, whether DataDome answered,
+  timing, the CSV's row count and column names, and the Worker's outbound IP. The link,
+  key and record values are never shown.
   **Test, no User-Agent** repeats it without the Worker's User-Agent header.
 
 The page itself holds no data. Every endpoint needs `Authorization: Bearer <ADMIN_TOKEN>`.
 
-## The Give Lively feed
+## The CSV link
+
+Give Lively's event-ticketing CSV ("dataclip") link returns every purchase for one
+event, one row per purchase. It has no ID column and no time filter, so the Worker:
+
+- downloads the file each run and keeps rows bought in the last 7 days (Meta's limit),
+  but never before the Worker's first run, so turning it on doesn't send old sales;
+- gives each row a stable ID: a hash of the buyer's email, purchase time and tier.
+  Already-sent IDs are skipped, so each purchase is sent once, and a pending payment
+  is picked up when it turns `succeeded`.
+
+| CSV column | Used for |
+|---|---|
+| `Status` | Must be `succeeded` |
+| `Amount Spent` | Meta `value` |
+| `Amount Refunded` | Refunded rows are skipped |
+| `Date/Time of Purchase` (e.g. `2026-10-06 04:34:38 PM CDT`) | Meta `event_time` |
+| `Tier Purchased` | Meta `content_ids` |
+| `Tickets Purchased` | Meta `num_items` |
+| `Page Name`, `Internal Name` | `EVENT_MATCH` (optional), Meta `content_name` |
+| `Email`, `First Name`, `Last Name`, `Phone Number` | Hashed `em`, `fn`, `ln`, `ph` |
+| `city`, `state`, `postal_code` | Hashed `ct`, `st`, `zp` (there is no country column) |
+
+`EVENT_PAGE_URL` supplies Meta's `event_source_url`.
+
+## The Zapier JSON feed
 
 The feed returns one record per **line item** (one ticket, or one donation), newest
 change first, filtered by `data_modified_timestamp` when `start_time_ms` is passed.
@@ -186,8 +215,9 @@ events older than 7 days in any case, so this Worker skips them.
 
 | Name | Kind | Default | Purpose |
 |---|---|---|---|
-| `GL_ORG_ID` | dashboard var | | Give Lively organization ID |
-| `GL_API_KEY` | secret | | Give Lively Zapier API key (part of the feed URL, never logged) |
+| `GL_CSV_URL` | secret | | Event ticket CSV link. When set, used instead of the JSON feed (never logged) |
+| `GL_ORG_ID` | dashboard var | | Give Lively organization ID (JSON feed) |
+| `GL_API_KEY` | secret | | Give Lively Zapier API key (JSON feed; part of the URL, never logged) |
 | `META_PIXEL_ID` | dashboard var | | Pixel/dataset ID |
 | `META_ACCESS_TOKEN` | secret | | Conversions API token (sent in the request body, never logged) |
 | `META_API_VERSION` | `wrangler.jsonc` | `v26.0` | Graph API version |
@@ -226,7 +256,9 @@ The poll interval is `triggers.crons` in `wrangler.jsonc` (default every 5 minut
 
 **"Give Lively's bot protection (DataDome) blocked the request (HTTP 403)".**
 Give Lively's site sits behind DataDome, which blocks requests from cloud servers,
-including Cloudflare Workers. The JSON feed is meant for integrations and is already
+including Cloudflare Workers. The event CSV link is not behind it, so the simplest
+fix is to set `GL_CSV_URL`. To keep using the JSON feed instead, ask Give Lively to
+allow it. The JSON feed is meant for integrations and is already
 protected by your API key, so ask Give Lively support to exempt it. You can send:
 
 > We use the Zapier JSON endpoints (`/nonprofits/{id}/json_dataclips/...json`) from our

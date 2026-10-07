@@ -103,10 +103,70 @@ export function donation(overrides: GLRecord = {}): GLRecord {
   });
 }
 
+/** Columns of Give Lively's event-ticketing CSV dataclip, in order. */
+export const CSV_COLUMNS = [
+  "First Name", "Last Name", "Email", "Tier Purchased", "Tier Category", "Tickets Purchased",
+  "Total Seats", "Amount Spent", "Amount Refunded", "Transaction Fee Covered", "Date/Time of Purchase",
+  "Referrer URL", "Payment Method", "Status", "UTM Source", "Page Name", "Internal Name",
+  "Client Application Name", "Registered to Double the Donation", "Company/Organization Name",
+  "Phone Number", "Would you like to receive our newsletter?", "full_address", "street", "street_2",
+  "city", "state", "postal_code",
+];
+
+/** One made-up CSV purchase row, as a record keyed by column. */
+export function csvRow(overrides: Record<string, string> = {}): Record<string, string> {
+  return {
+    "First Name": "Jane",
+    "Last Name": "Doe",
+    Email: "Test@Example.com",
+    "Tier Purchased": "Table Sponsor",
+    "Tier Category": "Sponsorship",
+    "Tickets Purchased": "1",
+    "Total Seats": "4",
+    "Amount Spent": "$500.00",
+    "Amount Refunded": "$0.00",
+    "Transaction Fee Covered": "$15.25",
+    "Date/Time of Purchase": "2026-10-07 09:55:00 AM CDT",
+    "Referrer URL": "",
+    "Payment Method": "Stripe Card",
+    Status: "succeeded",
+    "UTM Source": "",
+    "Page Name": "Art Soup 2026 Tickets",
+    "Internal Name": "Art Soup 2026 Tickets",
+    "Client Application Name": "Give Lively",
+    "Registered to Double the Donation": "false",
+    "Company/Organization Name": "",
+    "Phone Number": "251-555-0123",
+    "Would you like to receive our newsletter?": "Yes",
+    full_address: "100 Example St, Mobile, AL 36602",
+    street: "100 Example St",
+    street_2: "",
+    city: "Mobile",
+    state: "AL",
+    postal_code: "36602",
+    ...overrides,
+  };
+}
+
+/** Render rows as CSV text, quoting every field. */
+export function toCsv(rows: Record<string, string>[]): string {
+  const q = (v: string) => `"${v.replace(/"/g, '""')}"`;
+  return [CSV_COLUMNS.map(q).join(","), ...rows.map((r) => CSV_COLUMNS.map((c) => q(r[c] ?? "")).join(","))].join("\r\n") + "\r\n";
+}
+
+export const CSV_URL = "https://secure.givelively.org/nonprofits/example/event-ticketing/dataclips/SECRET-CSV-ID.csv";
+
+export function csvConfig(overrides: Partial<Config> = {}): Config {
+  return config({ csvUrl: CSV_URL, source: "csv", allowEmptyMatch: true, eventMatch: "", ...overrides });
+}
+
 export function config(overrides: Partial<Config> = {}): Config {
   return {
     glOrgId: "org-test",
     glApiKey: "SECRETKEY123",
+    csvUrl: "",
+    source: "json",
+    allowEmptyMatch: false,
     metaPixelId: "1234567890",
     metaAccessToken: "TOKEN_ABC",
     metaApiVersion: "v26.0",
@@ -205,7 +265,10 @@ export function fakeFetch(
     const body = init?.body ? JSON.parse(String(init.body)) : undefined;
     calls.push({ url, body });
     if (url.includes("givelively.org")) {
-      return typeof records === "function" ? records() : Response.json(records);
+      if (typeof records === "function") return records();
+      return url.endsWith(".csv")
+        ? new Response(toCsv(records as Record<string, string>[]), { headers: { "content-type": "text/csv" } })
+        : Response.json(records);
     }
     if (url.includes("graph.facebook.com")) return meta(body);
     throw new Error("unexpected url");

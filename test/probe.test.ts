@@ -25,7 +25,7 @@ describe("runProbe", () => {
   it("reports a DataDome block without leaking the key", async () => {
     const f = fake(() => datadome());
     const r = await runProbe(cfg, "worker", f.fn);
-    expect(r.verdict).toMatch(/^Blocked: DataDome/);
+    expect(r.verdict).toBe("JSON feed: blocked by DataDome bot protection.");
     expect(r.probes.every((p) => p.status === 403 && p.datadome)).toBe(true);
     expect(r.probes[1]!.body).toBe("DataDome CAPTCHA challenge (no Give Lively response)");
     expect(r.worker_egress).toEqual({ ip: "203.0.113.7", colo: "ATL", loc: "US" });
@@ -43,7 +43,7 @@ describe("runProbe", () => {
           : Response.json([{ email: "jane@example.com" }, { email: "john@example.com" }]),
     );
     const r = await runProbe(cfg, "worker", f.fn);
-    expect(r.verdict).toMatch(/^Not blocked/);
+    expect(r.verdict).toMatch(/^JSON feed: not blocked/);
     expect(r.probes[1]!.body).toBe('{"success":true}');
     expect(r.probes[2]!.body).toBe("JSON array with 2 record(s) from the last hour");
     expect(JSON.stringify(r)).not.toContain("example.com");
@@ -71,5 +71,21 @@ describe("runProbe", () => {
     const r = await runProbe(cfg, "worker", f.fn);
     expect(JSON.stringify(r)).not.toContain("SECRETKEY123");
     expect(r.probes[1]!.error).toContain("[redacted]");
+  });
+});
+
+describe("runProbe with a CSV link", () => {
+  it("reports rows and columns but not the link or data", async () => {
+    const csvUrl = "https://secure.givelively.org/x/dataclips/SECRET-CSV-ID.csv";
+    const f = fake((url) =>
+      url.endsWith(".csv")
+        ? new Response('"First Name","Email"\r\n"Jane","jane@example.com"\r\n', { headers: { "content-type": "text/csv" } })
+        : new Response("<html></html>"),
+    );
+    const r = await runProbe({ glOrgId: "", glApiKey: "", csvUrl }, "worker", f.fn);
+    expect(r.verdict).toBe("CSV link: works.");
+    expect(r.probes.map((p) => p.name)).toEqual(["home page (no key)", "CSV link (GL_CSV_URL)"]);
+    expect(r.probes[1]!.body).toBe('CSV with about 1 row(s). Columns: "First Name","Email"');
+    expect(JSON.stringify(r)).not.toMatch(/SECRET-CSV-ID|jane@example/);
   });
 });
