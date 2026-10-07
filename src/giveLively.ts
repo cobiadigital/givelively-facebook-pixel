@@ -37,13 +37,24 @@ export async function fetchRecords(
   let res: Response;
   try {
     res = await fetchImpl(dataUrl(cfg, startTimeMs), {
-      headers: { accept: "application/json" },
+      headers: {
+        accept: "application/json",
+        // Identify this integration honestly so Give Lively can recognize (and allow) it.
+        "user-agent": "givelively-capi-worker (+https://github.com/cobiadigital/givelively-facebook-pixel)",
+      },
     });
   } catch {
     // Network errors can include the URL in their message, so drop the original.
     throw new GiveLivelyError("Give Lively network error");
   }
   if (!res.ok) {
+    if (res.headers.has("x-datadome") || res.headers.has("x-datadome-cid")) {
+      throw new GiveLivelyError(
+        `Give Lively's bot protection (DataDome) blocked the request (HTTP ${res.status}). ` +
+          "Give Lively needs to allow this endpoint; see README Troubleshooting.",
+        res.status,
+      );
+    }
     throw new GiveLivelyError(
       res.status === 404
         ? "Give Lively returned 404 (check GL_ORG_ID and GL_API_KEY)"

@@ -78,10 +78,12 @@ export async function handleRequest(req: Request, env: Env): Promise<Response> {
   if (url.pathname === "/run" && req.method === "POST") {
     const wantDry = url.searchParams.get("dry") === "1";
     const dryRun = wantDry || !cfg.sendEnabled;
+    const hours = Number(url.searchParams.get("hours"));
+    const windowHours = Number.isFinite(hours) && hours > 0 ? Math.min(hours, 24 * 7) : undefined;
     const summary = await runPoll(
       cfg,
       { store, fetch: (...a) => fetch(...a), now: Date.now, log },
-      { trigger: "manual", dryRun },
+      { trigger: "manual", dryRun, windowHours: dryRun ? windowHours : undefined },
     );
     return json({
       ...(dryRun && !wantDry
