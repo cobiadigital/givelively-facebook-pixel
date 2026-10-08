@@ -25,7 +25,11 @@ export interface Deps {
 export interface RunOptions {
   trigger: "cron" | "manual";
   dryRun: boolean;
-  /** Dry runs only: look back this many hours instead of using the cursor. */
+  /**
+   * Manual runs only (dry or real): look back this many hours instead of using the
+   * cursor and first-run origin. A real manual run with this set is a deliberate
+   * backfill; dedupe still prevents re-sending. Ignored for cron runs.
+   */
   windowHours?: number;
 }
 
@@ -140,7 +144,7 @@ export async function runPoll(cfg: Config, deps: Deps, opts: RunOptions): Promis
       if (!opts.dryRun) await deps.store.setState({ origin_ms: String(origin) });
     }
     let windowStart: number;
-    if (opts.dryRun && opts.windowHours) {
+    if (opts.trigger === "manual" && opts.windowHours) {
       windowStart = startMs - opts.windowHours * 3600 * 1000;
     } else if (cfg.source === "csv") {
       // The CSV is filtered by purchase time, which doesn't change when a pending

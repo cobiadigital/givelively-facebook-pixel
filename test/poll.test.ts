@@ -221,9 +221,9 @@ describe("dry run window and Give Lively blocks", () => {
     expect(Number(new URL(x.f.calls[0]!.url).searchParams.get("start_time_ms"))).toBe(NOW - 48 * 3600_000);
   });
 
-  it("windowHours is ignored for real runs", async () => {
+  it("windowHours is ignored for cron runs", async () => {
     const x = setup([]);
-    await runPoll(config(), x.deps, { trigger: "manual", dryRun: false, windowHours: 48 });
+    await runPoll(config(), x.deps, { trigger: "cron", dryRun: false, windowHours: 48 });
     expect(Number(new URL(x.f.calls[0]!.url).searchParams.get("start_time_ms"))).toBe(NOW);
   });
 
