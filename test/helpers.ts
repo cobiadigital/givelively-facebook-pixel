@@ -1,5 +1,5 @@
 import type { Config } from "../src/config";
-import type { EventRow, FinalRow, Store } from "../src/db";
+import type { EventRow, FinalRow, SendMode, Store } from "../src/db";
 import type { GLRecord } from "../src/fields";
 
 /**
@@ -198,22 +198,23 @@ export class MemoryStore implements Store {
   async setState(entries: Record<string, string>) {
     for (const [k, v] of Object.entries(entries)) this.state.set(k, v);
   }
-  async getFinalIds(ids: string[]) {
+  async getFinalIds(ids: string[], mode: SendMode) {
     return new Set(
       ids.filter((id) => {
         const r = this.rows.get(id);
-        return r && r.status !== "failed";
+        return r && r.status !== "failed" && !(mode === "live" && r.status === "test_sent");
       }),
     );
   }
-  async getSentOrderIds(orderIds: string[]) {
-    const sent = new Set([...this.rows.values()].filter((r) => r.status === "sent").map((r) => r.order_id));
+  async getSentOrderIds(orderIds: string[], mode: SendMode) {
+    const ok = mode === "live" ? ["sent"] : ["sent", "test_sent"];
+    const sent = new Set([...this.rows.values()].filter((r) => ok.includes(r.status)).map((r) => r.order_id));
     return new Set(orderIds.filter((o) => sent.has(o)));
   }
   async recordFinal(rows: FinalRow[], nowIso: string) {
     for (const r of rows) {
       const existing = this.rows.get(r.event_id);
-      if (existing && existing.status !== "failed") continue;
+      if (existing && existing.status !== "failed" && existing.status !== "test_sent") continue;
       this.rows.set(r.event_id, { ...r, sent_at: nowIso, attempts: existing?.attempts ?? 0 });
     }
   }
@@ -221,9 +222,10 @@ export class MemoryStore implements Store {
     const out = new Map<string, number>();
     for (const r of rows) {
       const existing = this.rows.get(r.event_id);
-      if (existing && existing.status !== "failed") continue;
+      if (existing && existing.status !== "failed" && existing.status !== "test_sent") continue;
       const attempts = (existing?.attempts ?? 0) + 1;
-      this.rows.set(r.event_id, { ...r, status: "failed", sent_at: nowIso, attempts });
+      const status = existing?.status === "test_sent" ? "test_sent" : "failed";
+      this.rows.set(r.event_id, { ...r, status, sent_at: nowIso, attempts });
       out.set(r.event_id, attempts);
     }
     return out;
@@ -237,7 +239,7 @@ export class MemoryStore implements Store {
     if (this.lock?.owner === owner) this.lock = null;
   }
   async counts() {
-    const out: Record<string, number> = { sent: 0, skipped: 0, rejected: 0, failed: 0 };
+    const out: Record<string, number> = { sent: 0, test_sent: 0, skipped: 0, rejected: 0, failed: 0 };
     for (const r of this.rows.values()) out[r.status] = (out[r.status] ?? 0) + 1;
     return out;
   }

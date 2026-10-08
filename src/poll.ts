@@ -182,7 +182,8 @@ export async function runPoll(cfg: Config, deps: Deps, opts: RunOptions): Promis
     }
 
     // 2. Drop line items handled in an earlier run.
-    const done = await deps.store.getFinalIds([...matched.keys()]);
+    const sendMode = cfg.metaTestEventCode ? "test" : "live";
+    const done = await deps.store.getFinalIds([...matched.keys()], sendMode);
     s.already_done = done.size;
 
     // 3. Group the rest by order, so a 4-ticket order is one Purchase worth all 4.
@@ -198,7 +199,7 @@ export async function runPoll(cfg: Config, deps: Deps, opts: RunOptions): Promis
     // The Meta event_id is the order ID. If part of the order was already sent in
     // an earlier run, use a distinct ID so Meta doesn't drop the rest as a duplicate.
     const orderIds = [...groups.values()].map((g) => g.orderId).filter((o): o is string => !!o);
-    const partlySent = await deps.store.getSentOrderIds([...new Set(orderIds)]);
+    const partlySent = await deps.store.getSentOrderIds([...new Set(orderIds)], sendMode);
     for (const g of groups.values()) {
       g.lines.sort((a, b) => a.id.localeCompare(b.id));
       const base = g.orderId ?? g.lines[0]!.id;
@@ -236,6 +237,7 @@ export async function runPoll(cfg: Config, deps: Deps, opts: RunOptions): Promis
     }
 
     const nowIso = iso(startMs);
+    const sentStatus = sendMode === "test" ? "test_sent" : "sent";
     const finals: FinalRow[] = [];
     const finalize = (g: Group, status: FinalRow["status"], reason: string | null) => {
       for (const l of g.lines) {
@@ -256,7 +258,7 @@ export async function runPoll(cfg: Config, deps: Deps, opts: RunOptions): Promis
     if (batch.length) {
       const res = await sendEvents(cfg, batch.map(eventOf), deps.fetch);
       if (res.ok) {
-        for (const g of batch) finalize(g, "sent", null);
+        for (const g of batch) finalize(g, sentStatus, null);
         s.sent = batch.length;
       } else if (res.retryable) {
         pending = batch.length;
@@ -273,7 +275,7 @@ export async function runPoll(cfg: Config, deps: Deps, opts: RunOptions): Promis
           const g = singles[i]!;
           const r = await sendEvents(cfg, [eventOf(g)], deps.fetch);
           if (r.ok) {
-            finalize(g, "sent", null);
+            finalize(g, sentStatus, null);
             s.sent++;
           } else if (r.retryable) {
             stoppedAt = i;

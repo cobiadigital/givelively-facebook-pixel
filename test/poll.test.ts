@@ -234,3 +234,21 @@ describe("dry run window and Give Lively blocks", () => {
     expect(s.cursor_advanced).toBe(false);
   });
 });
+
+describe("test mode vs live", () => {
+  it("re-sends test-mode purchases once live, but only once", async () => {
+    const x = setup([t(1)]);
+    const testCfg = config({ metaTestEventCode: "TEST1" });
+    expect(await run(x.deps, testCfg)).toMatchObject({ mode: "test_events", sent: 1 });
+    expect(x.store.rows.get("li-1")?.status).toBe("test_sent");
+    // Still in test mode: not sent again.
+    expect(await run(x.deps, testCfg)).toMatchObject({ sent: 0, already_done: 1 });
+    // Live: sent for real, then never again.
+    expect(await run(x.deps, config())).toMatchObject({ mode: "live", sent: 1, already_done: 0 });
+    expect(x.store.rows.get("li-1")?.status).toBe("sent");
+    expect(await run(x.deps, config())).toMatchObject({ sent: 0, already_done: 1 });
+    // Back in test mode, a live-sent purchase stays done.
+    expect(await run(x.deps, testCfg)).toMatchObject({ sent: 0, already_done: 1 });
+    expect(x.f.metaCalls().map((c) => c.body.test_event_code ?? "live")).toEqual(["TEST1", "live"]);
+  });
+});

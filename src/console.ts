@@ -97,6 +97,23 @@ export const CONSOLE_HTML = `<!doctype html>
     }
   }
 
+  // Look up the current mode first, so the confirmation says TEST or LIVE.
+  async function backfill() {
+    const token = $("token").value.trim();
+    if (!token) { $("state").textContent = "Enter the admin token first."; return; }
+    const h = $("hours").value || "24";
+    let mode = "unknown mode";
+    try {
+      const res = await fetch("/status", { headers: { authorization: "Bearer " + token } });
+      const s = await res.json();
+      if (!s.send_to_meta) mode = "nowhere (SEND_TO_META is off, so this is a dry run)";
+      else mode = s.test_events_mode ? "Meta TEST events" : "LIVE Meta data (counts toward your ads)";
+    } catch {}
+    if (confirm("Send every unsent purchase from the last " + h + " hours to " + mode + "? Meta ignores anything older than 7 days.")) {
+      call("POST", "/run?hours=" + encodeURIComponent(h));
+    }
+  }
+
   document.addEventListener("click", (ev) => {
     const act = ev.target && ev.target.dataset && ev.target.dataset.act;
     if (!act) return;
@@ -105,12 +122,7 @@ export const CONSOLE_HTML = `<!doctype html>
     if (act === "probe-noua") call("GET", "/probe?ua=none");
     if (act === "dry") call("POST", "/run?dry=1&hours=" + encodeURIComponent($("hours").value || "24"));
     if (act === "run" && confirm("Run one poll now? If sending is enabled, new ticket sales go to Meta.")) call("POST", "/run");
-    if (act === "backfill") {
-      const h = $("hours").value || "24";
-      if (confirm("Send every unsent purchase from the last " + h + " hours to Meta? (Meta ignores anything older than 7 days.)")) {
-        call("POST", "/run?hours=" + encodeURIComponent(h));
-      }
-    }
+    if (act === "backfill") backfill();
     if (act === "forget") { store.clear(); $("token").value = ""; $("state").textContent = "Token forgotten."; }
     if (act === "sample") {
       const q = new URLSearchParams({ hours: $("hours").value || "24" });

@@ -5,8 +5,14 @@
  */
 
 /** Final statuses: an event_id with one of these is never sent again. */
-export const FINAL_STATUSES = ["sent", "skipped", "rejected"] as const;
+export const FINAL_STATUSES = ["sent", "test_sent", "skipped", "rejected"] as const;
 export type FinalStatus = (typeof FINAL_STATUSES)[number];
+
+/**
+ * "test_sent" means sent to Meta Test Events only. It blocks re-sending while still
+ * in test mode, but not once live, so real purchases used for testing still count.
+ */
+export type SendMode = "live" | "test";
 
 export interface EventRow {
   /** Give Lively line_item_id. */
@@ -32,10 +38,10 @@ export interface Store {
   init(): Promise<void>;
   getState(key: string): Promise<string | null>;
   setState(entries: Record<string, string>): Promise<void>;
-  /** IDs among `ids` that have a final status. */
-  getFinalIds(ids: string[]): Promise<Set<string>>;
-  /** Order IDs among `orderIds` that already have a sent line item. */
-  getSentOrderIds(orderIds: string[]): Promise<Set<string>>;
+  /** IDs among `ids` already handled in this mode (test sends don't count when live). */
+  getFinalIds(ids: string[], mode: SendMode): Promise<Set<string>>;
+  /** Order IDs among `orderIds` that already have a line item sent in this mode. */
+  getSentOrderIds(orderIds: string[], mode: SendMode): Promise<Set<string>>;
   /** Insert final rows. Existing final rows are never overwritten. */
   recordFinal(rows: FinalRow[], nowIso: string): Promise<void>;
   /** Count a failed attempt for each id and return the new attempt counts. */
@@ -81,13 +87,14 @@ export class D1Store implements Store {
     if (!col?.n) await this.db.prepare("ALTER TABLE sent_events ADD COLUMN order_id TEXT").run();
   }
 
-  async getSentOrderIds(orderIds: string[]): Promise<Set<string>> {
+  async getSentOrderIds(orderIds: string[], mode: SendMode): Promise<Set<string>> {
+    const statuses = mode === "live" ? "'sent'" : "'sent','test_sent'";
     const found = new Set<string>();
     for (const part of chunks(orderIds, CHUNK)) {
       const placeholders = part.map((_, i) => `?${i + 1}`).join(",");
       const { results } = await this.db
         .prepare(
-          `SELECT DISTINCT order_id FROM sent_events WHERE status = 'sent' AND order_id IN (${placeholders})`,
+          `SELECT DISTINCT order_id FROM sent_events WHERE status IN (${statuses}) AND order_id IN (${placeholders})`,
         )
         .bind(...part)
         .all<{ order_id: string }>();
@@ -115,13 +122,14 @@ export class D1Store implements Store {
     if (stmts.length) await this.db.batch(stmts);
   }
 
-  async getFinalIds(ids: string[]): Promise<Set<string>> {
+  async getFinalIds(ids: string[], mode: SendMode): Promise<Set<string>> {
+    const statuses = mode === "live" ? "'sent','skipped','rejected'" : "'sent','test_sent','skipped','rejected'";
     const found = new Set<string>();
     for (const part of chunks(ids, CHUNK)) {
       const placeholders = part.map((_, i) => `?${i + 1}`).join(",");
       const { results } = await this.db
         .prepare(
-          `SELECT event_id FROM sent_events WHERE status IN ('sent','skipped','rejected') AND event_id IN (${placeholders})`,
+          `SELECT event_id FROM sent_events WHERE status IN (${statuses}) AND event_id IN (${placeholders})`,
         )
         .bind(...part)
         .all<{ event_id: string }>();
@@ -138,7 +146,7 @@ export class D1Store implements Store {
           `INSERT INTO sent_events (event_id, sent_at, value, status, reason, order_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
            ON CONFLICT(event_id) DO UPDATE SET sent_at = excluded.sent_at, value = excluded.value,
              status = excluded.status, reason = excluded.reason, order_id = excluded.order_id
-           WHERE sent_events.status = 'failed'`,
+           WHERE sent_events.status IN ('failed', 'test_sent')`,
         )
         .bind(r.event_id, nowIso, r.value, r.status, r.reason, r.order_id),
     );
@@ -157,7 +165,7 @@ export class D1Store implements Store {
           `INSERT INTO sent_events (event_id, sent_at, value, status, reason, attempts) VALUES (?1, ?2, ?3, 'failed', ?4, 1)
            ON CONFLICT(event_id) DO UPDATE SET sent_at = excluded.sent_at, reason = excluded.reason,
              attempts = sent_events.attempts + 1
-           WHERE sent_events.status = 'failed'
+           WHERE sent_events.status IN ('failed', 'test_sent')
            RETURNING event_id, attempts`,
         )
         .bind(r.event_id, nowIso, r.value, r.reason),
@@ -187,7 +195,7 @@ export class D1Store implements Store {
     const { results } = await this.db
       .prepare("SELECT status, COUNT(*) AS n FROM sent_events GROUP BY status")
       .all<{ status: string; n: number }>();
-    const out: Record<string, number> = { sent: 0, skipped: 0, rejected: 0, failed: 0 };
+    const out: Record<string, number> = { sent: 0, test_sent: 0, skipped: 0, rejected: 0, failed: 0 };
     for (const r of results) out[r.status] = r.n;
     return out;
   }

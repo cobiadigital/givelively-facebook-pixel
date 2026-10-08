@@ -213,6 +213,11 @@ value and ticket count) or `would_skip` (with a reason). Donations are absent un
 5. Make a plain donation and run again. Confirm nothing is sent.
 6. Delete `META_TEST_EVENT_CODE`. You're live, and the cron sends new sales every 5 minutes.
 
+Purchases sent while `META_TEST_EVENT_CODE` is set are recorded as `test_sent`, not
+`sent`. Once you go live they are sent again for real (once), so real purchases you
+used for testing still reach your ads data. To push them right away instead of waiting
+for the next cron run, use **Send look-back** with a window that covers them.
+
 `BACKFILL_HOURS` (default `0`) controls how far back the very first run looks.
 Leave it at `0` so launching doesn't flood Meta with old sales. Meta rejects
 events older than 7 days in any case, so this Worker skips them.
