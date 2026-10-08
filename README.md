@@ -110,7 +110,9 @@ admin token once; the page remembers it in that browser only. Buttons:
 
 - **Status**: last run, cursor, counts, the last 10 event IDs, and any missing settings.
 - **Dry run**: shows what would be sent from the look-back window (default 24 hours),
-  with no sending or saving.
+  with no sending or saving. A window longer than 7 days also lists older purchases
+  as `would_skip` / `too_old` (Meta's limit), which is a handy check that the source
+  is being read.
 - **Run now**: runs one real poll (when `SEND_TO_META` is `true`).
 - **Sample schema**: field names and types from the Give Lively feed. No values.
 - **Test Give Lively**: calls the home page, the CSV link and/or the JSON key-validation

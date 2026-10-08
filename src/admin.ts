@@ -82,7 +82,7 @@ export async function handleRequest(req: Request, env: Env): Promise<Response> {
     const wantDry = url.searchParams.get("dry") === "1";
     const dryRun = wantDry || !cfg.sendEnabled;
     const hours = Number(url.searchParams.get("hours"));
-    const windowHours = Number.isFinite(hours) && hours > 0 ? Math.min(hours, 24 * 7) : undefined;
+    const windowHours = Number.isFinite(hours) && hours > 0 ? Math.min(hours, 24 * 400) : undefined;
     const summary = await runPoll(
       cfg,
       { store, fetch: (...a) => fetch(...a), now: Date.now, log },
