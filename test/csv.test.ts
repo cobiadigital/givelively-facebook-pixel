@@ -158,3 +158,21 @@ describe("dry run beyond Meta's 7-day limit", () => {
     expect(store.rows.size).toBe(0);
   });
 });
+
+describe("manual look-back send", () => {
+  it("sends a purchase from before the first run, once", async () => {
+    const store = new MemoryStore();
+    const rows = [csvRow({ "Date/Time of Purchase": "2026-10-07 07:00:00 AM CDT" })]; // 3h before NOW
+    const f = fakeFetch(() => new Response(toCsv(rows), { headers: { "content-type": "text/csv" } }));
+    const deps: Deps = { store, fetch: f.fn, now: () => NOW, log: () => {} };
+
+    // The cron run sets the origin to now, so the earlier purchase is excluded.
+    expect(await runPoll(csvConfig(), deps, { trigger: "cron", dryRun: false })).toMatchObject({ fetched: 0 });
+    // A cron run can't widen the window.
+    expect(await runPoll(csvConfig(), deps, { trigger: "cron", dryRun: false, windowHours: 24 })).toMatchObject({ fetched: 0 });
+    // A manual look-back send can.
+    expect(await runPoll(csvConfig(), deps, { trigger: "manual", dryRun: false, windowHours: 24 })).toMatchObject({ fetched: 1, sent: 1 });
+    expect(await runPoll(csvConfig(), deps, { trigger: "manual", dryRun: false, windowHours: 24 })).toMatchObject({ sent: 0, already_done: 1 });
+    expect(f.metaCalls()).toHaveLength(1);
+  });
+});

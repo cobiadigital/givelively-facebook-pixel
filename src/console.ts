@@ -42,6 +42,7 @@ export const CONSOLE_HTML = `<!doctype html>
       <button class="primary" data-act="status">Status</button>
       <button data-act="dry">Dry run</button>
       <button data-act="run">Run now</button>
+      <button data-act="backfill">Send look-back</button>
       <button data-act="forget">Forget token</button>
     </div>
   </div>
@@ -104,6 +105,12 @@ export const CONSOLE_HTML = `<!doctype html>
     if (act === "probe-noua") call("GET", "/probe?ua=none");
     if (act === "dry") call("POST", "/run?dry=1&hours=" + encodeURIComponent($("hours").value || "24"));
     if (act === "run" && confirm("Run one poll now? If sending is enabled, new ticket sales go to Meta.")) call("POST", "/run");
+    if (act === "backfill") {
+      const h = $("hours").value || "24";
+      if (confirm("Send every unsent purchase from the last " + h + " hours to Meta? (Meta ignores anything older than 7 days.)")) {
+        call("POST", "/run?hours=" + encodeURIComponent(h));
+      }
+    }
     if (act === "forget") { store.clear(); $("token").value = ""; $("state").textContent = "Token forgotten."; }
     if (act === "sample") {
       const q = new URLSearchParams({ hours: $("hours").value || "24" });

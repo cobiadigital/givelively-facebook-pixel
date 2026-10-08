@@ -114,6 +114,10 @@ admin token once; the page remembers it in that browser only. Buttons:
   as `would_skip` / `too_old` (Meta's limit), which is a handy check that the source
   is being read.
 - **Run now**: runs one real poll (when `SEND_TO_META` is `true`).
+- **Send look-back**: a one-off real run over the look-back window, including purchases
+  made before the Worker's first run (which the cron never sends). Use it to test with
+  an existing purchase or to backfill on purpose. Already-sent purchases are skipped,
+  and Meta ignores anything older than 7 days.
 - **Sample schema**: field names and types from the Give Lively feed. No values.
 - **Test Give Lively**: calls the home page, the CSV link and/or the JSON key-validation
   endpoint and feed from the Worker, and reports status codes, whether DataDome answered,

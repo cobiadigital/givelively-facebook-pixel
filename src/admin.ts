@@ -86,7 +86,7 @@ export async function handleRequest(req: Request, env: Env): Promise<Response> {
     const summary = await runPoll(
       cfg,
       { store, fetch: (...a) => fetch(...a), now: Date.now, log },
-      { trigger: "manual", dryRun, windowHours: dryRun ? windowHours : undefined },
+      { trigger: "manual", dryRun, windowHours },
     );
     return json({
       ...(dryRun && !wantDry
